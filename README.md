@@ -54,50 +54,62 @@ python -m qcm_extraction.main "URL_DU_PDF"
 
 Le projet utilise une base de données Supabase avec les tables suivantes :
 
-- `universites` : Liste des universités
-  - `id` : UUID
-  - `nom` : Nom de l'université
-  - `created_at` : Date de création
+- `images` : Images associées aux contenus
+  - `id` : int4
+  - `type_contenu` : text
+  - `image_url` : text
+  - `contenu_id` : uuid
+  - `uuid` : uuid
 
-- `ue` : Unités d'enseignement
-  - `id` : UUID
-  - `numero` : Numéro de l'UE
-  - `nom` : Nom de l'UE
-  - `universite_id` : Référence vers l'université
-  - `created_at` : Date de création
+- `tables` : Tables dans le document
+  - `id` : int4
+  - `contenu` : jsonb
+  - `type_contenu` : text
+  - `contenu_id` : uuid
 
-- `qcm` : QCMs
-  - `id` : UUID
-  - `ue_id` : Référence vers l'UE
-  - `type` : Type de QCM (QCM, Correction, Colle, etc.)
-  - `titre` : Titre du QCM
-  - `session` : Numéro de session
-  - `annee_academique` : Année académique
-  - `date_examen` : Date de l'examen
-  - `created_at` : Date de création
+- `corrections` : Corrections associées aux réponses
+  - `id` : int4
+  - `created_at` : timestamp
+  - `latex` : text
+  - `uuid` : uuid
+  - `contenu` : jsonb
+  - `reponse_uuid` : uuid
+
+- `reponses` : Propositions de réponses pour les questions
+  - `id` : int4
+  - `lettre` : bpchar
+  - `est_correcte` : bool
+  - `question_id` : uuid
+  - `latex` : text
+  - `uuid` : uuid
+  - `contenu` : jsonb
 
 - `questions` : Questions des QCMs
-  - `id` : UUID
-  - `qcm_id` : Référence vers le QCM
-  - `numero` : Numéro de la question
-  - `texte` : Texte de la question
-  - `explication` : Explication de la réponse
-  - `created_at` : Date de création
+  - `qcm_id` : int4
+  - `numero` : int4
+  - `id` : uuid
+  - `uuid` : uuid
+  - `contenu` : jsonb
 
-- `options` : Options de réponse
-  - `id` : UUID
-  - `question_id` : Référence vers la question
-  - `lettre` : Lettre de l'option (A, B, C, etc.)
-  - `texte` : Texte de l'option
-  - `est_correcte` : Booléen indiquant si c'est la bonne réponse
-  - `created_at` : Date de création
+- `qcm` : QCMs
+  - `id` : int4
+  - `ue_id` : int4
+  - `date_examen` : timestamp
+  - `type` : text
+  - `annee` : text
+  - `uuid` : uuid
 
-- `images` : Images associées aux questions
-  - `id` : UUID
-  - `question_id` : Référence vers la question
-  - `url` : URL de l'image dans le stockage Supabase
-  - `alt` : Texte alternatif
-  - `created_at` : Date de création
+- `ue` : Unités d'enseignement
+  - `id` : int4
+  - `numero` : text
+  - `date_examen` : timestamp
+  - `universite_id` : int4
+
+- `universites` : Universités
+  - `id` : int4
+  - `numero` : int4
+  - `nom` : text
+  - `ville` : text
 
 ## Développement
 
