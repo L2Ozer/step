@@ -1,0 +1,6 @@
+mistralai
+supabase
+pdf2image
+requests
+pillow
+python-dotenv

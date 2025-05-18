@@ -1,3 +1,29 @@
-pdfs/
-node_modules/
+# Environnement virtuel
+venv/
+env/
 .env
+
+# Fichiers système
+.DS_Store
+
+# Fichiers Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+
+# Dossiers temporaires
+qcm_extraction/temp/
+pdf_downloads/
+
+# Logs
+*.log
+
+# Fichiers d'IDE
+.idea/
+.vscode/
+*.swp
+*.swo 
