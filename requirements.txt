@@ -1,6 +1,7 @@
-mistralai
-supabase
-pdf2image
-requests
-pillow
-python-dotenv
+mistralai>=0.0.3
+supabase>=1.0.3
+requests>=2.28.0
+Pillow>=9.4.0
+pdf2image>=1.16.3
+python-dotenv>=1.0.0
+PyMuPDF>=1.22.0

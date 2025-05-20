@@ -1,131 +1,91 @@
-# Extracteur de QCM
+# QCM Médical Extractor
 
-Ce projet permet d'extraire automatiquement les questions et les propositions de réponses à partir de fichiers PDF de QCM, puis de les sauvegarder dans une base de données Supabase.
+Ce projet est un système d'extraction automatisé de QCM médicaux depuis des fichiers PDF vers une base de données Supabase.
 
 ## Fonctionnalités
 
-- Téléchargement de PDF à partir d'une URL
-- Extraction des métadonnées (UE, type, année, etc.)
-- Extraction des questions et de leur numéro
-- Extraction des propositions de réponses (A, B, C, D, E)
-- Sauvegarde dans Supabase
+- Extraction de texte à partir de PDF médicaux via OCR (Mistral OCR)
+- Analyse intelligente du contenu pour identifier :
+  - Les métadonnées du document (UE, type de document, année, etc.)
+  - Les questions individuelles
+  - Les propositions de réponse pour chaque question
+  - Les réponses correctes
+- Sauvegarde automatique dans une base de données Supabase
+- Correction automatique des problèmes d'OCR (en particulier pour les questions 16-18)
+- Détection et prévention des doublons
 
 ## Prérequis
 
-- Python 3.8+
-- Compte Supabase
-- Compte Mistral AI (pour l'API)
+- Python 3.9+
+- Clé API Mistral
+- Compte Supabase avec URL et clé API
 
 ## Installation
 
-1. Cloner le dépôt
-```bash
-git clone [URL_DU_DEPOT]
-cd [NOM_DU_PROJET]
+1. Cloner le dépôt :
+```
+git clone https://github.com/votre-username/qcm-extractor.git
+cd qcm-extractor
 ```
 
-2. Installer les dépendances
-```bash
+2. Créer un environnement virtuel et installer les dépendances :
+```
+python -m venv venv
+source venv/bin/activate  # sous Unix/MacOS
+# ou
+venv\Scripts\activate  # sous Windows
 pip install -r requirements.txt
 ```
 
-3. Configurer les variables d'environnement
-```bash
-# Créer un fichier .env avec les variables suivantes
-MISTRAL_API_KEY=votre_clé_api_mistral
+3. Configurer les variables d'environnement (créer un fichier `.env` à la racine du projet) :
+```
+MISTRAL_API_KEY=votre_cle_api_mistral
 SUPABASE_URL=votre_url_supabase
-SUPABASE_KEY=votre_clé_supabase
+SUPABASE_KEY=votre_cle_api_supabase
 ```
 
 ## Utilisation
 
-```bash
-python -m qcm_extraction.main "URL_DU_PDF"
+### Extraction d'un PDF de QCM
+
+```python
+from qcm_extraction.extractor import QCMExtractor
+
+# Initialiser l'extracteur
+extractor = QCMExtractor()
+
+# Extraire les métadonnées d'un PDF
+pdf_url = "https://chemin-vers-votre-pdf.pdf"
+metadata = extractor.extract_metadata_from_path(pdf_url)
+
+# Les questions et propositions sont automatiquement extraites et sauvegardées dans Supabase
 ```
 
-## Structure du projet
+### Scripts utilitaires
 
-- `qcm_extraction/`: Module principal
-  - `main.py`: Point d'entrée
-  - `extractor.py`: Logique d'extraction
-  - `models.py`: Modèles de données
+- `test_extraction.py` : Test d'extraction sur un PDF spécifique
+- `auto_fix_ocr.py` : Correction manuelle des problèmes d'OCR pour les questions 16-18
+- `fix_duplicate_qcms.py` : Outil pour gérer les doublons dans la base de données
 
 ## Structure de la base de données
 
-Le projet utilise une base de données Supabase avec les tables suivantes :
+- **qcm** : Stocke les métadonnées des QCM
+- **questions** : Contient les questions individuelles liées à un QCM
+- **reponses** : Contient les propositions pour chaque question
 
-- `images` : Images associées aux contenus
-  - `id` : int4
-  - `type_contenu` : text
-  - `image_url` : text
-  - `contenu_id` : uuid
-  - `uuid` : uuid
+## Caractéristiques techniques
 
-- `tables` : Tables dans le document
-  - `id` : int4
-  - `contenu` : jsonb
-  - `type_contenu` : text
-  - `contenu_id` : uuid
+- Utilisation de l'API OCR de Mistral pour l'extraction de texte
+- Utilisation de modèles de langage pour l'analyse de contenu
+- Mécanismes de retry pour gérer les erreurs d'API
+- Stratégies d'extraction multi-passes pour maximiser la qualité
+- Détection automatique des pages de mauvaise qualité OCR
+- Remplacement intelligent du contenu pour les sections problématiques
 
-- `corrections` : Corrections associées aux réponses
-  - `id` : int4
-  - `created_at` : timestamp
-  - `latex` : text
-  - `uuid` : uuid
-  - `contenu` : jsonb
-  - `reponse_uuid` : uuid
+## Contributeurs
 
-- `reponses` : Propositions de réponses pour les questions
-  - `id` : int4
-  - `lettre` : bpchar
-  - `est_correcte` : bool
-  - `question_id` : uuid
-  - `latex` : text
-  - `uuid` : uuid
-  - `contenu` : jsonb
-
-- `questions` : Questions des QCMs
-  - `qcm_id` : int4
-  - `numero` : int4
-  - `id` : uuid
-  - `uuid` : uuid
-  - `contenu` : jsonb
-
-- `qcm` : QCMs
-  - `id` : int4
-  - `ue_id` : int4
-  - `date_examen` : timestamp
-  - `type` : text
-  - `annee` : text
-  - `uuid` : uuid
-
-- `ue` : Unités d'enseignement
-  - `id` : int4
-  - `numero` : text
-  - `date_examen` : timestamp
-  - `universite_id` : int4
-
-- `universites` : Universités
-  - `id` : int4
-  - `numero` : int4
-  - `nom` : text
-  - `ville` : text
-
-## Développement
-
-Pour contribuer au projet :
-
-1. Créer une branche pour votre fonctionnalité
-2. Développer et tester votre code
-3. Soumettre une pull request
-
-## Tests
-
-Pour lancer les tests :
-```bash
-python -m pytest qcm_extraction/tests/
-```
+- [Votre nom]
 
 ## Licence
 
-MIT 
+Ce projet est sous licence MIT. Voir le fichier `LICENSE` pour plus de détails. 

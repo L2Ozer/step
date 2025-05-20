@@ -1,29 +1,49 @@
-# Environnement virtuel
-venv/
-env/
-.env
-
-# Fichiers système
-.DS_Store
-
-# Fichiers Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
 *.egg-info/
+.installed.cfg
 *.egg
 
-# Dossiers temporaires
-qcm_extraction/temp/
-pdf_downloads/
+# Virtual Environment
+venv/
+ENV/
+env/
 
-# Logs
+# Extracted content and temporary files
+qcm_extraction/temp/
+qcm_extraction/logs/
+temp/
 *.log
 
-# Fichiers d'IDE
+# Local environment variables
+.env
+
+# IDE
 .idea/
 .vscode/
 *.swp
-*.swo 
+*.swo
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary PDF files
+*.temp.pdf
+temp_qcm.pdf 
