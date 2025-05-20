@@ -1425,6 +1425,9 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         """Identifie les réponses correctes à partir du contenu Markdown et met à jour la base de données."""
         print(f"🔍 Extraction des réponses correctes pour le QCM ID: {qcm_id}...")
         
+        # Initialisation du compteur de mises à jour - IMPORTANT: Doit être initialisé ici
+        updates_counter = 0
+        
         # Récupérer les questions et leurs options depuis la base de données
         try:
             # D'abord, récupérer les questions pour ce QCM
@@ -1442,246 +1445,122 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                 return
                 
             print(f"📌 {len(question_map)} questions mappées depuis Supabase.")
-            
-            # Recherche des sections "Réponses justes" dans le texte
-            corrections_section = None
-            
-            # Essayer de trouver la section des réponses correctes directement avec une expression régulière
-            # Plusieurs patterns possibles pour les titres des sections de réponses
-            correction_patterns = [
-                r'(?:Réponses\s+(?:justes|correctes|exactes))[^\n]*\n+((?:.+\n)+)',
-                r'(?:R[ée]ponses|Corrections|Corrig[ée])[^\n]*\n+((?:\d+[\.:\)]\s*[A-E,\s]+\n)+)',
-                r'(?:CORRECTION|CORRIGE)[^\n]*\n+((?:.+\n)+)',
-                r'(?:Question\s+\d+)[^\n]*\n+((?:.+\n)+)'  # Format "Question X" suivi du texte
-            ]
-            
+
+            # Créer un dictionnaire pour stocker toutes les lettres correctes par question
             corrections_data = {}
+            questions_with_answers = set()  # Pour suivre les questions déjà traitées
             
-            # Analyse alternative pour les formats courants des QCM: "A. Vrai" ou "A. Faux"
-            # Cette partie traite le cas spécifique où chaque réponse est notée "vrai" ou "faux"
-            print("🔍 Recherche des annotations Vrai/Faux pour chaque proposition...")
+            # Méthode PRINCIPALE: Recherche "Réponses justes : X, Y, Z"
+            # Cette méthode est la plus fiable et a priorité sur les autres
+            print("🔍 Recherche directe des réponses justes explicites...")
+            reponses_justes_pattern = r'(?:Q(?:uestion)?\s*(\d+)[^A-E]*|^#*\s*(\d+)[^A-E]*|^[^\d]*(\d+)[\.:\)][^A-E]*)(?:.*\n)*?.*[Rr](?:é|e)ponses?\s+(?:justes?|correctes?|exactes?)\s*:?\s*([A-E][,\s]*(?:[A-E][,\s]*)*)'
             
-            # AMÉLIORATION: Pattern étendu pour capturer plus de formats
-            vrai_faux_pattern = r'(?:Question\s+)?(\d+)[\.:\)]\s*(?:[^\n]+\n+)?([A-E])\.?\s+([Vv]rai|[Ff]aux|[Jj]uste|[Cc]orrect)'
-            all_vrai_faux_matches = list(re.finditer(vrai_faux_pattern, markdown_text))
-            
-            if all_vrai_faux_matches:
-                # Grouper par numéro de question
-                vrai_faux_by_question = {}
-                for match in all_vrai_faux_matches:
-                    try:
-                        question_num = int(match.group(1))
-                        lettre = match.group(2).upper()
-                        vf_status = match.group(3).lower()
-                        
-                        # Initialiser si la question n'existe pas encore
-                        if question_num not in vrai_faux_by_question:
-                            vrai_faux_by_question[question_num] = []
-                        
-                        # Ajouter seulement si c'est vrai/juste/correct
-                        if vf_status in ['vrai', 'juste', 'correct']:
-                            vrai_faux_by_question[question_num].append(lettre)
-                            print(f"Trouvé: Question {question_num}, proposition {lettre} est {vf_status}")
-                    except (ValueError, IndexError):
+            reponses_justes_matches = list(re.finditer(reponses_justes_pattern, markdown_text, re.MULTILINE))
+            if reponses_justes_matches:
+                for match in reponses_justes_matches:
+                    # Extraire le numéro de question (peut être dans différents groupes selon le format)
+                    question_num = None
+                    for i in range(1, 4):  # Vérifier les groupes 1, 2, 3
+                        if match.group(i):
+                            try:
+                                question_num = int(match.group(i))
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    if question_num is None:
                         continue
-                
-                # Ajouter aux corrections
-                for question_num, lettres in vrai_faux_by_question.items():
-                    if lettres:  # Seulement si on a au moins une réponse correcte
-                        corrections_data[question_num] = lettres
-                        print(f"✅ Question {question_num}: réponses correctes {', '.join(lettres)} (via Vrai/Faux)")
-            
-            # AMÉLIORATION: Extraction directe des réponses avec pattern plus inclusif
-            # Formats typiques plus étendus: "1:A", "1: A,B,E", "Question 1 : A,D", etc.
-            multi_answer_pattern = r'(?:Question\s+)?(\d+)\s*[\.:\)]\s*([A-E][,\s]*(?:[A-E][,\s]*)*)'
-            multi_answers = list(re.finditer(multi_answer_pattern, markdown_text))
-            
-            for match in multi_answers:
-                try:
-                    question_num = int(match.group(1))
-                    answers_str = match.group(2)
+                        
+                    # Extraire les lettres des réponses correctes
+                    answers_str = match.group(4)
                     letters = re.findall(r'[A-E]', answers_str)
                     
                     if letters:
-                        # Éviter de dédoubler les lettres
+                        # Éviter les doublons
                         unique_letters = list(set(letters))
-                        corrections_data[question_num] = unique_letters
-                        print(f"✅ Question {question_num}: réponses correctes {', '.join(unique_letters)} (via format multi-réponses)")
-                except (ValueError, IndexError):
-                    continue
-            
-            # Si les méthodes ci-dessus n'ont pas suffi, alors essayons les patterns classiques
-            if not corrections_data:
-                for pattern in correction_patterns:
-                    matches = re.finditer(pattern, markdown_text, re.IGNORECASE)
-                    for match in matches:
-                        corrections_text = match.group(1).strip()
-                        # Si on trouve du texte qui ressemble à des corrections, essayer d'extraire les réponses
-                        if corrections_text and len(corrections_text) > 10:  # Filtre minimal
-                            print(f"✅ Section de corrections trouvée: {corrections_text[:50]}...")
-                            
-                            # Essayer de parser directement les réponses avec regex
-                            # Formats typiques comme "1: A", "1 A,B", "Question 1: A", etc.
-                            question_answer_patterns = [
-                                r'(?:Question)?\s*(\d+)\s*[:)\.\-]\s*([A-E,\s]+)',  # 1: A,B
-                                r'(?:Question)?\s*(\d+)\s+([A-E][,\s]*(?:[A-E][,\s]*)*)',  # 1 A,B,C
-                                r'(\d+)\s*\(([A-E,\s]+)\)',  # 1(A,B,C)
-                                r'(\d+)(?:\s*-\s*|\.|\))\s*([A-E](?:\s*,\s*[A-E])*)'  # 1- A,B,C ou 1) A,B,C
-                            ]
-                            
-                            for line in corrections_text.split("\n"):
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                    
-                                parsed = False
-                                for qa_pattern in question_answer_patterns:
-                                    qa_match = re.search(qa_pattern, line)
-                                    if qa_match:
-                                        try:
-                                            question_num = int(qa_match.group(1))
-                                            answers_str = qa_match.group(2).strip()
-                                            # Extraire toutes les lettres A-E séparées par des virgules ou des espaces
-                                            letters = re.findall(r'[A-E]', answers_str)
-                                            if question_num > 0 and letters:
-                                                corrections_data[question_num] = letters
-                                                parsed = True
-                                                break
-                                        except (ValueError, IndexError):
-                                            continue
-                                
-                                if not parsed and re.search(r'\d+', line):
-                                    # Recherche avancée pour le format inversé où les faux sont indiqués
-                                    # Exemple: "B, C, D, E: Faux" signifie que A est juste
-                                    inverse_match = re.search(r'([A-E](?:,\s*[A-E])*)\s*:\s*(?:[Ff]aux|[Ii]ncorrect)', line)
-                                    if inverse_match and re.search(r'\d+', line):
-                                        try:
-                                            # Trouver le numéro de question dans la ligne ou utiliser le contexte
-                                            q_num_match = re.search(r'(\d+)', line)
-                                            if q_num_match:
-                                                question_num = int(q_num_match.group(1))
-                                                wrong_letters = re.findall(r'[A-E]', inverse_match.group(1))
-                                                # Déduire les lettres correctes par exclusion
-                                                all_letters = ['A', 'B', 'C', 'D', 'E']
-                                                correct_letters = [l for l in all_letters if l not in wrong_letters]
-                                                if correct_letters:
-                                                    corrections_data[question_num] = correct_letters
-                                                    parsed = True
-                                        except (ValueError, IndexError):
-                                            pass
-                                
-                                if not parsed and re.search(r'\d+', line):
-                                    print(f"⚠️ Format de réponse non reconnu: {line}")
-            
-            # Si l'extraction directe a fonctionné
-            if corrections_data:
-                print(f"✅ Réponses trouvées pour {len(corrections_data)} questions via regex")
-            else:
-                # Plan B: Utiliser l'IA pour extraire les réponses correctes
-                print("ℹ️ Tentative d'extraction des réponses correctes via API Mistral...")
-                
-                # Identifier les sections du texte susceptibles de contenir les réponses
-                # Chercher des sections avec "réponse", "correction", "corrigé", etc.
-                potential_sections = []
-                lines = markdown_text.split("\n")
-                for i, line in enumerate(lines):
-                    if re.search(r'(?:r[ée]ponses?|corrections?|corrig[ée]s?)', line, re.IGNORECASE):
-                        # Extraire un fragment (20 lignes) autour de cette ligne
-                        start = max(0, i - 5)
-                        end = min(len(lines), i + 15)
-                        section = "\n".join(lines[start:end])
-                        potential_sections.append(section)
-                
-                # Si le document est petit, utiliser l'ensemble du texte
-                if len(markdown_text) < 40000 and not potential_sections:
-                    truncated_text = markdown_text[:40000]
-                else:
-                    # Sinon, utiliser les sections potentielles (jusqu'à 40K caractères)
-                    truncated_text = "\n\n".join(potential_sections)[:40000]
-                
-                prompt = f"""
-                Tu es un expert dans l'analyse de QCM médicaux.
-                
-                MISSION:
-                Examine le texte ci-dessous et identifie les réponses correctes pour chaque question.
-                
-                Les réponses correctes sont généralement indiquées dans des sections comme "Réponses justes :", "Réponses exactes :", 
-                "Corrigé :", "CORRECTION", etc. suivies des lettres correspondantes (A, B, C, D, E).
-                
-                Exemples de formats courants:
-                - "Réponses justes : 1:A, 2:B, 3:A,C,E"
-                - "Question 1 : B, C, E"
-                - "Question 2 (A, D)"
-                - "1. A / 2. B, D / 3. C"
-                - "1) A 2) C 3) D"
-                
-                IMPORTANT:
-                - Pour chaque question, indique UNIQUEMENT les lettres (A, B, C, D, E) qui sont explicitement marquées comme correctes.
-                - Si une question n'a pas de réponse correcte indiquée, ne l'inclus pas dans le résultat.
-                - Si plusieurs lettres sont correctes pour une même question, inclus-les toutes.
-                - Fais TRÈS ATTENTION aux numéros des questions pour ne pas mélanger les réponses.
-                
-                Texte à analyser:
-                ---
-                {truncated_text}
-                ---
-                
-                Retourne un JSON avec cette structure:
-                {{
-                  "reponses_correctes": [
-                    {{ "numero_question": 1, "lettres_correctes": ["A", "C"] }},
-                    {{ "numero_question": 2, "lettres_correctes": ["B"] }},
-                    ...
-                  ]
-                }}
-                """
-                
-                try:
-                    messages = [UserMessage(content=prompt)]
-                    response = self._call_api_with_retry(
-                        self.client.chat.complete,
-                        model="mistral-medium-latest",  # Utiliser le modèle medium pour une meilleure compréhension
-                        messages=messages,
-                        temperature=0.0,
-                        response_format={"type": "json_object"}
-                    )
-                    
-                    # Vérifier si l'appel API a échoué
-                    if response is None:
-                        print("❌ Échec de l'appel API pour l'extraction des réponses correctes")
-                        # Continuer avec d'autres méthodes
-                        pass
-                    elif response.choices and response.choices[0].message and response.choices[0].message.content:
-                        response_text = response.choices[0].message.content
                         
-                        try:
-                            data = json.loads(response_text)
-                            correct_answers_list = data.get("reponses_correctes", [])
-                            
-                            if isinstance(correct_answers_list, list) and correct_answers_list:
-                                # Convertir au même format que les réponses extraites par regex
-                                for item in correct_answers_list:
-                                    if isinstance(item, dict):
-                                        numero = item.get("numero_question")
-                                        lettres = item.get("lettres_correctes", [])
-                                        if numero and isinstance(lettres, list) and lettres:
-                                            corrections_data[numero] = lettres
-                                
-                                print(f"✅ Réponses trouvées pour {len(corrections_data)} questions via API")
-                            else:
-                                print("⚠️ Aucune réponse correcte extraite via API ou format invalide.")
-                        except json.JSONDecodeError:
-                            print("⚠️ Erreur JSON dans la réponse API d'extraction des réponses correctes")
-                    else:
-                        print("⚠️ Réponse API invalide pour l'extraction des réponses correctes")
-                except Exception as e:
-                    print(f"🔥 Erreur API pour l'extraction des réponses correctes: {str(e)}")
+                        # Ajouter à corrections_data
+                        corrections_data[question_num] = unique_letters
+                        questions_with_answers.add(question_num)
+                        print(f"✅ Trouvé directement: Question {question_num}, réponses correctes: {', '.join(unique_letters)}")
             
-            # Si aucune correction n'est trouvée, arrêter le processus
-            if not corrections_data:
-                print("⚠️ Aucune réponse correcte n'a pu être extraite du document.")
+            # Obtenir la liste des questions qui n'ont pas encore de réponses
+            missing_questions = set(question_map.keys()) - questions_with_answers
+            
+            # Continuer avec les autres méthodes UNIQUEMENT pour les questions non traitées
+            if missing_questions:
+                print(f"ℹ️ {len(missing_questions)} questions n'ont pas de 'Réponses justes' explicites, recherche avec méthodes secondaires...")
                 
-                # Dernière tentative : détecter les questions où une seule proposition est correcte
+                # Méthode 2: Analyse directe du texte pour les formats "A. Vrai" / "A. Faux"
+                print("🔍 Recherche des annotations Vrai/Faux pour chaque proposition...")
+                
+                # AMÉLIORATION: Pattern étendu pour capturer plus de formats
+                vrai_faux_pattern = r'(?:Question\s+)?(\d+)[\.:\)]\s*(?:[^\n]+\n+)?([A-E])\.?\s+([Vv]rai|[Ff]aux|[Jj]uste|[Cc]orrect)'
+                all_vrai_faux_matches = list(re.finditer(vrai_faux_pattern, markdown_text))
+                
+                if all_vrai_faux_matches:
+                    # Grouper par numéro de question
+                    vrai_faux_by_question = {}
+                    for match in all_vrai_faux_matches:
+                        try:
+                            question_num = int(match.group(1))
+                            # Ne traiter que si la question n'a pas déjà été traitée par la méthode principale
+                            if question_num not in questions_with_answers:
+                                lettre = match.group(2).upper()
+                                vf_status = match.group(3).lower()
+                                
+                                # Initialiser si la question n'existe pas encore
+                                if question_num not in vrai_faux_by_question:
+                                    vrai_faux_by_question[question_num] = []
+                                
+                                # Ajouter seulement si c'est vrai/juste/correct
+                                if vf_status in ['vrai', 'juste', 'correct']:
+                                    vrai_faux_by_question[question_num].append(lettre)
+                                    print(f"Trouvé: Question {question_num}, proposition {lettre} est {vf_status}")
+                        except (ValueError, IndexError):
+                            continue
+                    
+                    # Ajouter aux corrections uniquement pour les questions manquantes
+                    for question_num, lettres in vrai_faux_by_question.items():
+                        if lettres and question_num in missing_questions:  # Seulement si on a au moins une réponse correcte et question non traitée
+                            corrections_data[question_num] = lettres
+                            questions_with_answers.add(question_num)
+                            print(f"✅ Question {question_num}: réponses correctes {', '.join(lettres)} (via Vrai/Faux)")
+                
+                # Mettre à jour les questions manquantes
+                missing_questions = set(question_map.keys()) - questions_with_answers
+                
+                # Méthode 3: Extraction directe des réponses avec pattern plus inclusif
+                if missing_questions:
+                    print("🔍 Recherche des réponses par format multi-réponses...")
+                    # Formats typiques plus étendus: "1:A", "1: A,B,E", "Question 1 : A,D", etc.
+                    multi_answer_pattern = r'(?:Question\s+)?(\d+)\s*[\.:\)]\s*([A-E][,\s]*(?:[A-E][,\s]*)*)'
+                    multi_answers = list(re.finditer(multi_answer_pattern, markdown_text))
+                    
+                    for match in multi_answers:
+                        try:
+                            question_num = int(match.group(1))
+                            # Ne traiter que si la question n'a pas déjà été traitée par d'autres méthodes
+                            if question_num not in questions_with_answers:
+                                answers_str = match.group(2)
+                                letters = re.findall(r'[A-E]', answers_str)
+                                
+                                if letters:
+                                    # Éviter de dédoubler les lettres
+                                    unique_letters = list(set(letters))
+                                    
+                                    corrections_data[question_num] = unique_letters
+                                    questions_with_answers.add(question_num)
+                                    print(f"✅ Question {question_num}: réponses correctes {', '.join(unique_letters)} (via format multi-réponses)")
+                        except (ValueError, IndexError):
+                            continue
+            
+            # Si il reste des questions sans réponses, tenter l'approche par déduction
+            missing_questions = set(question_map.keys()) - questions_with_answers
+            if missing_questions:
+                print(f"ℹ️ {len(missing_questions)} questions n'ont toujours pas de réponses correctes, tentative par déduction...")
+                
+                # Tentative : détecter les questions où une seule proposition est correcte
                 # par déduction à partir des propositions marquées comme fausses
                 print("🔍 Tentative de déduction à partir des formulations 'A. Faux.'...")
                 
@@ -1705,7 +1584,7 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                             pass
                     
                     # Si nous sommes dans une question, chercher les propositions
-                    if current_question is not None:
+                    if current_question is not None and current_question in missing_questions:
                         prop_matches = re.finditer(proposition_pattern, line)
                         for prop_match in prop_matches:
                             lettre = prop_match.group(1).upper()
@@ -1716,95 +1595,34 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                 
                 # Pour chaque question, déduire les bonnes réponses
                 for question_num, faux_lettres in faux_propositions.items():
-                    if len(faux_lettres) > 0 and len(faux_lettres) < 5:  # Si toutes ne sont pas fausses
+                    if question_num in missing_questions and len(faux_lettres) > 0 and len(faux_lettres) < 5:  # Si toutes ne sont pas fausses
                         all_letters = ['A', 'B', 'C', 'D', 'E']
                         correct_letters = [l for l in all_letters if l not in faux_lettres]
                         
                         if correct_letters:
                             corrections_data[question_num] = correct_letters
+                            questions_with_answers.add(question_num)
                             print(f"✅ Question {question_num}: réponses déduites {', '.join(correct_letters)} (par élimination)")
+
+            # Si des questions n'ont toujours pas de réponses, on pourrait utiliser l'API Mistral ici
+            # Mais nous allons conserver les questions déjà trouvées
+            
+            # Si toujours aucune réponse trouvée, fournir un feedback et continuer
+            if not corrections_data:
+                print("⚠️ Impossible de détecter les réponses correctes. Vérifiez manuellement le document.")
+                return
                 
-                # Si toujours rien, utiliser l'API
-                if not corrections_data:
-                    # Dernière tentative avec l'API intelligente
-                    print("🧠 Analyse intelligente du document avec Mistral pour extraire les réponses correctes...")
-                    
-                    # Prompt spécifique pour ce format
-                    mistral_prompt = f"""
-                    Tu es un expert en analyse de QCM médicaux. Examine attentivement le document suivant et 
-                    trouve les réponses correctes pour chaque question.
-                    
-                    FORMAT SPÉCIFIQUE:
-                    Dans ce document, les réponses correctes sont souvent indiquées de façon indirecte:
-                    - Parfois avec "A. Faux. [explication]" (ce qui signifie que A est FAUSSE)
-                    - Parfois avec "A. Vrai. [explication]" (ce qui signifie que A est CORRECTE)
-                    - Ou encore avec "A. [explication correcte]" ou "A. [explication incorrecte]"
-                    
-                    INSTRUCTIONS:
-                    1. Pour chaque question, analyse TOUTES les propositions (A, B, C, D, E)
-                    2. Détermine si chaque proposition est correcte (vraie) ou incorrecte (fausse)
-                    3. Pour chaque question, renvoie UNIQUEMENT les lettres des réponses CORRECTES
-                    
-                    DOCUMENT À ANALYSER:
-                    {markdown_text[:30000]}
-                    
-                    EXEMPLE DE RÉPONSE ATTENDUE:
-                    {{
-                      "reponses_correctes": [
-                        {{ "numero": 1, "lettres": ["A", "C"] }},
-                        {{ "numero": 2, "lettres": ["E"] }},
-                        {{ "numero": 3, "lettres": ["B", "D"] }}
-                      ]
-                    }}
-                    """
-                    
-                    try:
-                        messages = [UserMessage(content=mistral_prompt)]
-                        response = self._call_api_with_retry(
-                            self.client.chat.complete,
-                            model="mistral-medium-latest",
-                            messages=messages,
-                            temperature=0.0,
-                            response_format={"type": "json_object"}
-                        )
-                        
-                        # Vérifier si l'appel API a échoué
-                        if response is None:
-                            print("❌ Échec de l'appel API pour l'analyse intelligente des réponses correctes")
-                            # Continuer avec d'autres méthodes ou terminer
-                            pass
-                        elif response.choices and response.choices[0].message:
-                            try:
-                                response_text = response.choices[0].message.content
-                                data = json.loads(response_text)
-                                
-                                if "reponses_correctes" in data and isinstance(data["reponses_correctes"], list):
-                                    for item in data["reponses_correctes"]:
-                                        if isinstance(item, dict):
-                                            numero = item.get("numero")
-                                            lettres = item.get("lettres", [])
-                                            
-                                            if numero and lettres:
-                                                corrections_data[numero] = lettres
-                                                print(f"✅ Question {numero}: réponses {', '.join(lettres)} (via analyse intelligente)")
-                            except json.JSONDecodeError:
-                                print("⚠️ Erreur de décodage JSON de la réponse API")
-                    except Exception as e:
-                        print(f"⚠️ Erreur lors de l'analyse intelligente: {str(e)}")
-                
-                # Si toujours aucune réponse trouvée, arrêter
-                if not corrections_data:
-                    print("❌ Impossible de détecter les réponses correctes même après plusieurs tentatives.")
-                    return
+            # Montrer les stats
+            all_questions = set(question_map.keys())
+            missing_final = all_questions - questions_with_answers
+            if missing_final:
+                print(f"⚠️ {len(missing_final)} questions n'ont pas de réponses correctes identifiées: {sorted(missing_final)}")
             
             # Maintenant, récupérer les réponses et mettre à jour leur statut
             print(f"📊 Réponses correctes trouvées pour {len(corrections_data)} questions")
+            print(f"🔄 Mise à jour des réponses dans Supabase...")
             
-            # Initialisation du compteur de mises à jour
-            updates_counter = 0
-            
-            # CORRECTION: la partie critique qui ne fonctionnait pas correctement
-            # Pour chaque question qui a des réponses correctes identifiées
+            # MÉTHODE SIMPLIFIÉE ET PLUS ROBUSTE pour mettre à jour les réponses
             for numero, lettres_correctes in corrections_data.items():
                 # Vérification si la question existe dans la base de données
                 if numero not in question_map:
@@ -1813,10 +1631,9 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                 
                 question_id = question_map[numero]
                 
-                # Récupérer toutes les réponses pour cette question
+                # 1. D'abord, récupérer toutes les réponses pour cette question
                 try:
-                    # 1. Sélectionner toutes les réponses pour cette question
-                    responses_result = self.supabase.table("reponses").select("id", "lettre", "est_correcte").eq("question_id", question_id).execute()
+                    responses_result = self.supabase.table("reponses").select("id", "lettre").eq("question_id", question_id).execute()
                     
                     if not responses_result.data:
                         print(f"⚠️ Aucune réponse trouvée pour la question {numero}")
@@ -1824,15 +1641,10 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                     
                     print(f"📊 Question {numero}: {len(responses_result.data)} propositions trouvées, {len(lettres_correctes)} correctes ({', '.join(lettres_correctes)})")
                     
-                    # 2. Traitement par lot pour optimiser les performances
-                    updates_to_true = []
-                    updates_to_false = []
-                    
-                    # Préparer les mises à jour
+                    # 2. Mettre à jour chaque réponse individuellement (approche fiable)
                     for response in responses_result.data:
                         response_id = response.get("id")
                         lettre = response.get("lettre")
-                        current_status = response.get("est_correcte", False)
                         
                         if not response_id or not lettre:
                             continue
@@ -1840,68 +1652,55 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                         # Déterminer si cette réponse est correcte
                         est_correcte = lettre in lettres_correctes
                         
-                        # Ne mettre à jour que si nécessaire
-                        if est_correcte != current_status:
-                            if est_correcte:
-                                updates_to_true.append(response_id)
+                        try:
+                            # Mise à jour explicite avec vérification du résultat
+                            result = self.supabase.table("reponses").update({"est_correcte": est_correcte}).eq("id", response_id).execute()
+                            
+                            if result.data:
+                                updates_counter += 1
+                                status_str = "CORRECTE" if est_correcte else "incorrecte"
+                                print(f"    ✅ Proposition {lettre} (ID: {response_id}) marquée comme {status_str}")
                             else:
-                                updates_to_false.append(response_id)
-                    
-                    # 3. Effectuer les mises à jour par lot
-                    if updates_to_true:
-                        try:
-                            # Mettre à jour toutes les réponses correctes en une seule opération
-                            self.supabase.table("reponses").update({"est_correcte": True}).in_("id", updates_to_true).execute()
-                            updates_counter += len(updates_to_true)
-                            print(f"    ✅ {len(updates_to_true)} propositions marquées comme CORRECTES")
+                                print(f"    ⚠️ Mise à jour non confirmée pour proposition {lettre} (ID: {response_id})")
                         except Exception as e:
-                            print(f"    ⚠️ Erreur lors de la mise à jour des réponses correctes: {str(e)}")
-                            
-                            # Fallback: mettre à jour une par une si l'opération en masse échoue
-                            for response_id in updates_to_true:
-                                try:
-                                    self.supabase.table("reponses").update({"est_correcte": True}).eq("id", response_id).execute()
-                                    updates_counter += 1
-                                except Exception as e2:
-                                    print(f"    ⚠️ Échec pour ID {response_id}: {str(e2)}")
-                    
-                    if updates_to_false:
-                        try:
-                            # Mettre à jour toutes les réponses incorrectes en une seule opération
-                            self.supabase.table("reponses").update({"est_correcte": False}).in_("id", updates_to_false).execute()
-                            updates_counter += len(updates_to_false)
-                            print(f"    ❌ {len(updates_to_false)} propositions marquées comme incorrectes")
-                        except Exception as e:
-                            print(f"    ⚠️ Erreur lors de la mise à jour des réponses incorrectes: {str(e)}")
-                            
-                            # Fallback: mettre à jour une par une
-                            for response_id in updates_to_false:
-                                try:
-                                    self.supabase.table("reponses").update({"est_correcte": False}).eq("id", response_id).execute()
-                                    updates_counter += 1
-                                except Exception as e2:
-                                    print(f"    ⚠️ Échec pour ID {response_id}: {str(e2)}")
-                    
+                            print(f"    ⚠️ Erreur lors de la mise à jour de la proposition {lettre} (ID: {response_id}): {str(e)}")
                 except Exception as e:
-                    print(f"⚠️ Erreur lors de la récupération ou mise à jour des réponses pour la question {numero}: {str(e)}")
+                    print(f"⚠️ Erreur lors de la récupération des réponses pour la question {numero}: {str(e)}")
             
-            # Vérifier que des mises à jour ont bien été effectuées
-            if updates_counter == 0 and corrections_data:
-                print("⚠️ ALERTE: Aucune mise à jour n'a été effectuée malgré la détection de réponses correctes!")
-                print("   Cela peut indiquer un problème avec les IDs de questions ou l'API Supabase.")
-                
-                # Vérification supplémentaire
-                try:
-                    print("🔍 Vérification des permissions et de la structure de la table 'reponses'...")
-                    sample_result = self.supabase.table("reponses").select("id").limit(1).execute()
-                    print(f"   ✅ Accès à la table 'reponses' confirmé: {len(sample_result.data)} entrée(s) trouvée(s)")
-                except Exception as e:
-                    print(f"   ❌ Problème d'accès à la table 'reponses': {str(e)}")
-            else:
+            # Vérification finale des mises à jour
+            if updates_counter > 0:
                 print(f"✅ Mise à jour terminée: {updates_counter} réponses mises à jour.")
                 print(f"✅ {len(corrections_data)} questions ont leurs réponses correctes identifiées.")
+            else:
+                print("⚠️ Aucune mise à jour n'a été effectuée. Tentative de méthode alternative...")
                 
+                # MÉTHODE ALTERNATIVE: mise à jour directe par lettre et question
+                alt_updates = 0
+                for numero, lettres_correctes in corrections_data.items():
+                    if numero not in question_map:
+                        continue
+                    
+                    question_id = question_map[numero]
+                    
+                    # Mettre à jour directement par lettres
+                    for lettre in "ABCDE":
+                        est_correcte = lettre in lettres_correctes
+                        try:
+                            result = self.supabase.table("reponses").update({"est_correcte": est_correcte}).eq("question_id", question_id).eq("lettre", lettre).execute()
+                            if result.data and len(result.data) > 0:
+                                alt_updates += 1
+                                print(f"    ✅ Question {numero}, Proposition {lettre}: mise à jour alternative réussie")
+                        except Exception as e:
+                            print(f"    ⚠️ Erreur lors de la mise à jour alternative pour Q{numero}, Prop {lettre}: {str(e)}")
+                
+                if alt_updates > 0:
+                    print(f"✅ Méthode alternative: {alt_updates} réponses mises à jour.")
+                else:
+                    print("❌ Toutes les méthodes de mise à jour ont échoué.")
+            
         except Exception as e:
             print(f"🔥 Erreur lors de la récupération des données depuis Supabase: {str(e)}")
             import traceback
             print(f"Traceback: {traceback.format_exc()}")
+            
+        return updates_counter
