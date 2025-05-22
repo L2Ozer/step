@@ -13,6 +13,7 @@ from pdf2image import convert_from_path
 from mistralai import Mistral, UserMessage
 from io import BytesIO
 from supabase import create_client, Client
+from tqdm import tqdm
 
 class QCMExtractor:
     def __init__(self, api_key: str = None, supabase_url: str = None, supabase_key: str = None):
@@ -139,93 +140,70 @@ class QCMExtractor:
                 print("❌ Échec de l'appel API OCR pour la conversion en Markdown")
                 return None
             
+            # Convertir le PDF en images dès le début pour pouvoir utiliser la méthode alternative si nécessaire
+            pdf_images = self.pdf_to_images(pdf_path)
+            if not pdf_images:
+                print("❌ Impossible de convertir le PDF en images")
+                return None
+                
+            print(f"✅ PDF converti en {len(pdf_images)} images")
+            
             # Extraire le texte de toutes les pages
             markdown_content = ""
+            replaced_pages = {}  # Garder une trace des pages remplacées
+            
             for i, page in enumerate(ocr_response.pages):
                 markdown_content += f"# Page {i+1}\n\n"
                 
                 # Vérification de la qualité du texte extrait
                 page_markdown = page.markdown
                 
-                # Vérifier si le texte extrait est de mauvaise qualité
+                # Liste des patterns qui indiquent une extraction de mauvaise qualité
+                low_quality_patterns = [
+                    r'00000000000000',  # Séries de zéros (erreur OCR)
+                    r'1111111111',      # Séries de uns (erreur OCR)
+                    r'[^\w\s.,;:!?()-]{{20,}}',  # Longues séquences de caractères spéciaux
+                    r'(\w)\1{10,}',     # Répétition du même caractère plus de 10 fois
+                ]
+                
+                # Détection de critères objectifs de mauvaise qualité
                 quality_check_failed = False
-                if len(page_markdown.strip()) < 100:  # Page trop courte
+                
+                # Vérifier si le texte est trop court
+                if len(page_markdown.strip()) < 200:  # Page significativement courte
                     quality_check_failed = True
                     print(f"⚠️ Page {i+1} trop courte, seulement {len(page_markdown.strip())} caractères détectés")
-                elif "00000000000000" in page_markdown:  # Texte avec des séries de zéros (erreur OCR)
-                    quality_check_failed = True
-                    print(f"⚠️ Page {i+1} contient des séries de zéros, probable erreur OCR")
-                elif i == 6:  # Vérification spécifique pour la page 7 (index 6)
-                    # Détection spécifique pour la page 7 (qui contient souvent les questions 16-18)
-                    if not re.search(r'(?:Q(?:uestion)?\s*16|16\s*[\.\)])', page_markdown, re.IGNORECASE):
-                        print(f"⚠️ Page 7 (index {i}) ne contient pas la question 16, probable erreur OCR")
+                
+                # Vérifier les patterns de mauvaise qualité
+                for pattern in low_quality_patterns:
+                    if re.search(pattern, page_markdown):
                         quality_check_failed = True
-                    elif not re.search(r'(?:Q(?:uestion)?\s*17|17\s*[\.\)])', page_markdown, re.IGNORECASE):
-                        print(f"⚠️ Page 7 (index {i}) ne contient pas la question 17, probable erreur OCR")
-                        quality_check_failed = True
-                    elif not re.search(r'(?:Q(?:uestion)?\s*18|18\s*[\.\)])', page_markdown, re.IGNORECASE):
-                        print(f"⚠️ Page 7 (index {i}) ne contient pas la question 18, probable erreur OCR")
+                        print(f"⚠️ Page {i+1} contient des patterns typiques d'erreur OCR")
+                        break
+                
+                # Vérifier qu'il existe au moins une question sur cette page
+                # Un QCM typique devrait avoir des questions numérotées comme "Question 1", "Q2", etc.
+                question_pattern = r'(?:[Qq](?:uestion)?\s*\d+|^\d+\s*[\.\)])'
+                if not re.search(question_pattern, page_markdown) and i > 0:  # Ignorer la première page qui peut être un en-tête
+                    print(f"⚠️ Page {i+1} ne contient aucune question détectable")
+                    # Ne pas échouer automatiquement, mais augmenter la probabilité d'utiliser l'alternative
+                    if len(page_markdown.strip()) < 400:  # Si en plus le texte est assez court
                         quality_check_failed = True
                 
-                # Si l'extraction est de mauvaise qualité, essayer une méthode alternative
-                if quality_check_failed:
-                    print(f"⚠️ Qualité OCR faible détectée pour la page {i+1}, utilisation d'une méthode alternative...")
+                # Si l'extraction est de mauvaise qualité, essayer une méthode alternative basée sur la vision
+                if quality_check_failed and i < len(pdf_images):
+                    print(f"⚠️ Qualité OCR faible détectée pour la page {i+1}, utilisation de l'API vision...")
+                    
                     try:
-                        # Si c'est la page 7 (index 6) et contient normalement les questions 16-18
-                        if i == 6:
-                            print(f"🔄 Remplacement de la page 7 par le contenu connu des questions 16-18...")
-                            page_markdown = """# Stansanté 
-
-formoup
-Tél : 03 83 40 70 02
-contact@stan-sante.com
-UE 1 – Biologie Cellulaire Fondamentale
-
-## Q16. A propos de la technique d'ombrage et cryofracture :
-
-A. Une congélation précède la cassure.
-B. Elle permet l'observation des surfaces internes des membranes.  
-C. La cassure de l'échantillon se fait à l'aide d'un couteau.
-D. L'ombrage se fait grâce à la vaporisation de sels de métaux lourds.
-E. C'est une technique réalisée pour des observations en microscope électronique.
-
-Réponses justes : A, B, C, D, E.
-
-
-## Q17. A propos du noyau :
-
-A. Sa forme varie en fonction de l'âge.
-B. Les ostéoclastes sont des cellules plurinucléées.
-C. Les polynucléaires ont un unique noyau.
-D. Au microscope électronique, l'hétérochromatine apparait dense aux électrons.
-E. Il occupe une position centrale dans les fibres musculaires squelettique.
-
-Réponses justes : A, B, C, D.
-E. Faux. Il occupe une position périphérique dans les fibres musculaires squelettiques.
-
-
-## Q18. A propos de l'ADN dans le noyau :
-
-A. Un nucléosome est composé d'ADN et d'histones H1, H2, H3 et H4.
-B. Une chromatide mesure environ 700 nm de large.
-C. Un chromatosome ne contient pas de protéine.
-D. Une chromatine dont les histones sont acétylées et l'ADN méthylé est sous forme compactée.  
-E. Il est associé aux lamines.
-
-Réponses justes : B, E.
-A. Faux. Un nucléosome est composé d'ADN et d'histones H2A, H2B, H3 et H4.
-C. Faux. Un chromatosome = nucléosome + H1, et les histones sont des protéines.
-D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthylé est sous forme décompactée.
-"""
-                            print(f"✅ Page 7 remplacée avec succès")
+                        # Utiliser l'API de vision pour extraire le texte de l'image
+                        alt_text = self.extract_text_from_image_with_vision(pdf_images[i])
+                        
+                        if alt_text and len(alt_text.strip()) > 200:  # Vérifier que le texte extrait est suffisant
+                            page_markdown = alt_text
+                            print(f"✅ Extraction alternative réussie pour la page {i+1}")
+                            replaced_pages[i+1] = "vision_api"  # Garder une trace des pages remplacées
                         else:
-                            # Pour les autres pages, utiliser extraction depuis l'image
-                            # Convertir le PDF en images et extraire le texte via l'API de chat
-                            images = self.pdf_to_images(pdf_path)
-                            if i < len(images):
-                                page_text = self.extract_text_from_image(images[i])
-                                page_markdown = page_text
-                                print(f"✅ Texte extrait via méthode alternative pour la page {i+1}")
+                            print(f"⚠️ Extraction alternative insuffisante pour la page {i+1}")
                     except Exception as alt_err:
                         print(f"⚠️ Erreur lors de l'extraction alternative pour la page {i+1}: {str(alt_err)}")
                 
@@ -240,6 +218,11 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
             with open(markdown_path, "w", encoding="utf-8") as f:
                 f.write(markdown_content)
             
+            # Sauvegarder aussi les informations sur les pages remplacées
+            replaced_info_path = output_dir / "replaced_pages.json"
+            with open(replaced_info_path, "w", encoding="utf-8") as f:
+                json.dump(replaced_pages, f, ensure_ascii=False, indent=2)
+            
             print(f"💾 Markdown sauvegardé: {markdown_path}")
             return str(markdown_path)
             
@@ -247,6 +230,79 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
             print(f"⚠️ Erreur lors de la conversion en Markdown: {str(e)}")
             return None
 
+    def extract_text_from_image_with_vision(self, image_path: str) -> str:
+        """
+        Extrait le texte d'une image en utilisant l'API Mistral avec capacités de vision.
+        Cette méthode est utilisée comme alternative quand l'OCR standard échoue.
+        
+        Args:
+            image_path (str): Chemin vers l'image à analyser
+            
+        Returns:
+            str: Le texte extrait de l'image
+        """
+        try:
+            print(f"🔍 Tentative d'extraction de texte depuis l'image {image_path} avec l'API vision...")
+            
+            # Encoder l'image en base64
+            with open(image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+            
+            # Construire les messages pour l'API
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": """Tu es un expert en extraction de texte à partir d'images de QCM. 
+                            
+Extrais TOUT le texte visible dans cette image, en particulier:
+- Titres et en-têtes
+- Questions numérotées (par ex. "Question 16", "Q.17", etc.)
+- Propositions de réponses (A, B, C, D, E)
+- Tout texte explicatif ou instructions
+
+Maintiens le formatage exact avec les numéros des questions et les lettres des propositions.
+Conserve les paragraphes et la structure du texte.
+Formate ta réponse en markdown simple.
+                            
+Si tu vois des formules mathématiques, essaie de les représenter correctement avec la notation LaTex."""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    ]
+                }
+            ]
+            
+            # Appeler l'API vision
+            response = self._call_api_with_retry(
+                self.client.chat.complete,
+                model="mistral-large-latest",  # Utiliser le modèle large qui a de meilleures capacités de vision
+                messages=messages,
+                temperature=0.0,
+                max_tokens=4000
+            )
+            
+            if response is None:
+                print("❌ Échec de l'appel API vision")
+                return ""
+            
+            extracted_text = response.choices[0].message.content.strip()
+            
+            # Résumer les résultats
+            text_length = len(extracted_text)
+            num_questions = len(re.findall(r'(?:[Qq](?:uestion)?\s*\d+|^\d+\s*[\.\)])', extracted_text))
+            print(f"✅ Extraction par vision réussie: {text_length} caractères, ~{num_questions} questions détectées")
+            
+            return extracted_text
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de l'extraction par vision: {str(e)}")
+            return ""
+    
     def save_to_supabase(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Sauvegarde les métadonnées dans Supabase"""
         try:
@@ -428,10 +484,16 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                     
                     if saved_questions_details:
                         print(f"ℹ️ Phase 1 terminée. {len(saved_questions_details)} question(s) ont des détails sauvegardés.")
+                        
+                        # SUPPRESSION DE LA PAUSE SIGNIFICATIVE ICI - Cause racine identifiée ailleurs
+                        # delay_before_propositions = 10 # secondes
+                        # print(f"⏸️ Pause de {delay_before_propositions} secondes avant la Phase 2 (Propositions) pour assurer la visibilité des données...")
+                        # time.sleep(delay_before_propositions)
+                        
                         print("▶️ Lancement de la Phase 2: Extraction des propositions...")
-                        # Pause avant la deuxième série d'appels API pour les propositions
-                        print("⏸️ Pause de 10 secondes avant l'extraction des propositions...")
-                        time.sleep(10) 
+                        # La pause originale de 10s pour l'API peut être rétablie si nécessaire, mais le problème principal est ailleurs.
+                        # print("⏸️ Pause de 10 secondes avant l'extraction des propositions...")
+                        # time.sleep(10) 
                         
                         # Obtenir le nombre initial de propositions pour cette question
                         prop_count_before = 0
@@ -457,6 +519,10 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                         # Extraire les propositions
                         self._extract_and_save_propositions(markdown_content_for_processing, qcm_id_for_processing, saved_questions_details)
                         print("🏁 Phase 2 terminée.")
+                        
+                        # Nettoyer les questions et propositions dupliquées
+                        print("🧹 Nettoyage des questions et propositions dupliquées...")
+                        self._clean_duplicate_questions_and_propositions(qcm_id_for_processing)
                         
                         # Compter les propositions après insertion pour les statistiques
                         prop_count_after = 0
@@ -516,6 +582,168 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         except Exception as e:
             print(f"⚠️ Erreur lors de l'extraction des métadonnées: {str(e)}")
             return None
+
+    def _clean_duplicate_questions_and_propositions(self, qcm_id: int) -> None:
+        """
+        Nettoie les questions dupliquées et les propositions dupliquées pour un QCM.
+        Cette méthode est appelée après l'extraction pour s'assurer que chaque question
+        a exactement 5 propositions (A, B, C, D, E).
+        
+        Args:
+            qcm_id (int): ID du QCM à nettoyer
+        """
+        print(f"🔍 Vérification des questions pour le QCM ID: {qcm_id}")
+        
+        # Détection des questions dupliquées
+        questions = self.supabase.table('questions').select('id,numero').eq('qcm_id', qcm_id).execute()
+        
+        if not questions.data:
+            print(f"⚠️ Aucune question trouvée pour le QCM ID: {qcm_id}")
+            return
+        
+        print(f"✅ {len(questions.data)} questions trouvées")
+        
+        # Organiser les questions par numéro
+        questions_by_number = {}
+        for q in questions.data:
+            num = q["numero"]
+            if num not in questions_by_number:
+                questions_by_number[num] = []
+            questions_by_number[num].append(q)
+        
+        # Vérifier les duplications de questions
+        duplicate_questions = {num: qs for num, qs in questions_by_number.items() if len(qs) > 1}
+        
+        if duplicate_questions:
+            print(f"\n⚠️ Détection de questions en double: {len(duplicate_questions)} numéros de question dupliqués")
+            
+            for num, dupes in duplicate_questions.items():
+                print(f"Question {num}: {len(dupes)} duplications (IDs: {[q['id'] for q in dupes]})")
+                
+                # Trier par ID (garder l'ID le plus élevé, probablement le plus récent)
+                dupes.sort(key=lambda q: q['id'])
+                
+                # Garder la question avec l'ID le plus élevé et supprimer les autres
+                keep = dupes[-1]
+                delete = dupes[:-1]
+                
+                print(f"  ✅ Conservation de la question {num} (ID: {keep['id']})")
+                
+                for q_to_delete in delete:
+                    try:
+                        # D'abord, supprimer toutes les propositions liées à cette question
+                        delete_props = self.supabase.table('reponses').delete().eq('question_id', q_to_delete['id']).execute()
+                        print(f"  🗑️ Suppression de {len(delete_props.data) if delete_props.data else 0} propositions pour la question {num} (ID: {q_to_delete['id']})")
+                        
+                        # Ensuite, supprimer la question elle-même
+                        delete_q = self.supabase.table('questions').delete().eq('id', q_to_delete['id']).execute()
+                        print(f"  🗑️ Question {num} en double (ID: {q_to_delete['id']}) supprimée")
+                        
+                        # Pause pour éviter de surcharger l'API
+                        time.sleep(0.2)
+                    except Exception as e:
+                        print(f"  ❌ Erreur lors de la suppression de la question {num} (ID: {q_to_delete['id']}): {str(e)}")
+        
+        # Maintenant obtenir une liste à jour des questions
+        questions = self.supabase.table('questions').select('id,numero').eq('qcm_id', qcm_id).execute()
+        
+        questions_to_fix = []
+        
+        # Vérifier combien de propositions a chaque question
+        for question in questions.data:
+            q_id = question['id']
+            q_num = question['numero']
+            
+            # Récupérer les propositions pour cette question
+            props = self.supabase.table('reponses').select('*').eq('question_id', q_id).execute()
+            prop_count = len(props.data)
+            
+            if prop_count != 5:
+                print(f"⚠️ Question {q_num} (ID: {q_id}): {prop_count} propositions - nécessite nettoyage")
+                questions_to_fix.append({
+                    'id': q_id,
+                    'numero': q_num,
+                    'propositions': props.data
+                })
+            else:
+                print(f"✅ Question {q_num} (ID: {q_id}): 5 propositions - OK")
+        
+        if not questions_to_fix:
+            print("✅ Toutes les questions ont exactement 5 propositions. Aucun nettoyage nécessaire.")
+            return
+        
+        # Nettoyer les questions qui ont des propositions dupliquées
+        for question in questions_to_fix:
+            q_id = question['id']
+            q_num = question['numero']
+            propositions = question['propositions']
+            
+            print(f"\n🧹 Nettoyage de la question {q_num} (ID: {q_id}) avec {len(propositions)} propositions")
+            
+            # Trier les propositions par ID (les plus récents en dernier)
+            propositions.sort(key=lambda x: x['id'])
+            
+            # Garder uniquement une proposition par lettre (A, B, C, D, E)
+            # en privilégiant celle avec l'ID le plus élevé (la plus récente)
+            props_by_letter = {}
+            for prop in propositions:
+                lettre = prop['lettre']
+                if lettre in props_by_letter:
+                    # Si l'ID est plus élevé, remplacer
+                    if prop['id'] > props_by_letter[lettre]['id']:
+                        props_by_letter[lettre] = prop
+                else:
+                    props_by_letter[lettre] = prop
+            
+            # Vérifier qu'on a bien 5 propositions (A, B, C, D, E)
+            expected_letters = ['A', 'B', 'C', 'D', 'E']
+            
+            if set(props_by_letter.keys()) != set(expected_letters):
+                print(f"⚠️ Lettres manquantes: {set(expected_letters) - set(props_by_letter.keys())}")
+                print(f"⚠️ Lettres supplémentaires: {set(props_by_letter.keys()) - set(expected_letters)}")
+                continue
+            
+            # Collecter les IDs à supprimer (tous sauf ceux qu'on garde)
+            kept_ids = [prop['id'] for prop in props_by_letter.values()]
+            to_delete_ids = [prop['id'] for prop in propositions if prop['id'] not in kept_ids]
+            
+            if to_delete_ids:
+                print(f"🗑️ Suppression de {len(to_delete_ids)} propositions dupliquées: {to_delete_ids}")
+                
+                # Supprimer les propositions dupliquées
+                for delete_id in to_delete_ids:
+                    try:
+                        result = self.supabase.table('reponses').delete().eq('id', delete_id).execute()
+                        print(f"  ✅ Proposition ID {delete_id} supprimée")
+                        # Petite pause pour éviter de surcharger l'API
+                        time.sleep(0.1)
+                    except Exception as e:
+                        print(f"  ❌ Erreur lors de la suppression de la proposition ID {delete_id}: {str(e)}")
+            else:
+                print("✅ Aucune proposition à supprimer")
+        
+        # Vérification finale
+        print("\n✅ Nettoyage terminé. Vérification finale:")
+        
+        all_ok = True
+        for question in self.supabase.table('questions').select('id,numero').eq('qcm_id', qcm_id).execute().data:
+            q_id = question['id']
+            q_num = question['numero']
+            
+            # Récupérer les propositions pour cette question
+            props = self.supabase.table('reponses').select('*').eq('question_id', q_id).execute()
+            prop_count = len(props.data)
+            
+            if prop_count != 5:
+                print(f"⚠️ Question {q_num}: {prop_count} propositions - toujours un problème!")
+                all_ok = False
+            else:
+                print(f"✅ Question {q_num}: 5 propositions - OK")
+        
+        if all_ok:
+            print("\n🎉 Toutes les questions ont maintenant exactement 5 propositions!")
+        else:
+            print("\n⚠️ Certaines questions ont toujours un nombre incorrect de propositions.")
 
     def encode_image_to_base64(self, image_path: str, max_size: int = 1000) -> str:
         """Encode une image en Base64 avec redimensionnement si nécessaire"""
@@ -616,347 +844,241 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
             return metadata, []
 
     def _extract_and_save_questions_only(self, markdown_text: str, qcm_id: int) -> List[Dict[str, Any]]:
-        """Phase 1: Extrait UNIQUEMENT les questions du texte Markdown page par page,
-        les sauvegarde dans Supabase, et retourne les détails des questions sauvegardées."""
+        """Phase 1: Extrait les questions uniquement d'un document Markdown"""
         print(f"📝 Phase 1: Extraction des questions uniquement pour QCM ID: {qcm_id}...")
         
-        # Vérifier si des questions existent déjà pour ce QCM
-        try:
-            existing_questions = self.supabase.table("questions").select("numero").eq("qcm_id", qcm_id).execute()
-            existing_question_numbers = set()
-            if existing_questions.data:
-                existing_question_numbers = {q["numero"] for q in existing_questions.data if "numero" in q}
-                print(f"ℹ️ {len(existing_question_numbers)} questions existent déjà pour ce QCM")
-        except Exception as e:
-            print(f"⚠️ Erreur lors de la vérification des questions existantes: {str(e)}")
-            existing_question_numbers = set()
+        # Charger les informations sur les pages remplacées si elles existent
+        pdf_stem = None
+        replaced_questions = []
         
-        # Améliorer le découpage des pages pour éviter les pertes
+        # Déterminer le répertoire de sortie
+        match = re.search(r'qcm_extraction/temp/outputs/([^/]+)/content\.md', markdown_text)
+        if match:
+            pdf_stem = match.group(1)
+            replaced_info_path = Path(f"qcm_extraction/temp/outputs/{pdf_stem}/replaced_pages.json")
+            
+            if replaced_info_path.exists():
+                try:
+                    with open(replaced_info_path, "r", encoding="utf-8") as f:
+                        replaced_pages = json.load(f)
+                        
+                        # Extraire toutes les questions remplacées
+                        for page_num, questions in replaced_pages.items():
+                            replaced_questions.extend(questions)
+                            
+                        print(f"ℹ️ Questions remplacées détectées: {replaced_questions}")
+                except Exception as e:
+                    print(f"⚠️ Erreur lors du chargement des informations sur les pages remplacées: {str(e)}")
+        
+        # Diviser le document en sections par page
         page_sections = []
         header_matches = list(re.finditer(r'^# Page \d+', markdown_text, flags=re.MULTILINE))
         
         if not header_matches:
-            if markdown_text.strip(): 
-                page_sections.append(markdown_text.strip())
-                print("    📄 Document sans marqueurs de page, traité comme une seule section")
+            if markdown_text.strip():
+                page_sections.append({"index": 1, "content": markdown_text.strip()})
         else:
-            # Extraire les sections de page avec une meilleure gestion des limites
             for i, match in enumerate(header_matches):
                 start_content = match.end()
                 end_content = header_matches[i+1].start() if (i + 1) < len(header_matches) else len(markdown_text)
                 page_content = markdown_text[start_content:end_content].strip()
                 
-                # Extraire le numéro de page pour référence
+                # Extraire le numéro de page
                 page_header = match.group(0)
                 page_num = re.search(r'Page (\d+)', page_header)
                 page_num = int(page_num.group(1)) if page_num else i + 1
                 
-                # Ajouter un chevauchement pour éviter de perdre des questions à la frontière des pages
-                if i > 0 and page_content:
-                    # Ajouter les 200 derniers caractères de la page précédente
-                    prev_start = header_matches[i-1].end()
-                    prev_content = markdown_text[prev_start:start_content].strip()
-                    overlap = prev_content[-200:] if len(prev_content) > 200 else prev_content
-                    page_content = overlap + "\n\n" + page_content
+                print(f"    📄 Section de page {i+1} correspond à la Page {page_num} du PDF")
                 
-                if page_content: 
-                    page_sections.append(page_content)
-                    print(f"    📄 Section de page {i+1} correspond à la Page {page_num} du PDF")
-                else:
-                    print(f"    ⚠️ Section de page {i+1} (Page {page_num} du PDF) est vide après nettoyage")
-
-        if not page_sections:
-            print("ℹ️ Aucun contenu de page trouvé pour l'extraction des questions.")
-            return []
-
-        # Traiter toutes les pages d'un coup si contenu total raisonnable
-        total_content_length = sum(len(section) for section in page_sections)
-        all_questions_from_all_pages_api_data = []
+                if page_content:
+                    page_sections.append({"index": i+1, "content": page_content, "page_num": page_num})
         
-        # Stratégie adaptative: traiter en une fois si contenu petit, sinon par pages
-        if total_content_length < 40000 and len(page_sections) <= 3:
-            print(f"📄 Document de taille raisonnable ({total_content_length} caractères), traitement en une fois...")
-            combined_content = "\n\n".join(page_sections)
+        print(f"📄 Traitement page par page ({len(page_sections)} sections)...")
+        
+        # Collections de questions et tracking des numéros de questions
+        all_questions_data = []
+        unique_question_numbers = set()
+        question_numbers_sequence = []
+        
+        # Pour chaque section de page, extraire les questions
+        for index, section in enumerate(page_sections):
+            print(f"📄 Traitement section {index+1}/{len(page_sections)} pour questions...")
             
-            # Tronquer si nécessaire tout en gardant un maximum de contenu
-            truncated_content = combined_content[:40000]
+            # Vérifier si cette section contient du contenu remplacé
+            has_replaced_content = False
+            if "<!-- REPLACED_CONTENT:START -->" in section["content"] and "<!-- REPLACED_CONTENT:END -->" in section["content"]:
+                has_replaced_content = True
+                print(f"    ⚠️ Cette section contient du contenu remplacé (page {section.get('page_num', index+1)})")
             
-            # Utiliser un prompt plus précis pour extraire toutes les questions
-            prompt = f"""Tu es un expert en analyse de QCM (Questionnaires à Choix Multiples).
-            À partir du contenu Markdown d'un document QCM fourni ci-dessous, identifie et extrais CHAQUE question.
+            # Structure pour l'appel API
+            prompt_data = {
+                "content": section["content"],
+                "section_num": index + 1,
+                "qcm_id": qcm_id,
+                "has_replaced_content": has_replaced_content
+            }
             
-            INSTRUCTIONS CRUCIALES:
-            1. Assure-toi d'identifier TOUTES les questions, en particulier celles numérotées de 1 à 50.
-            2. VÉRIFIE ATTENTIVEMENT que les numéros de questions se suivent correctement (1, 2, 3, etc.).
-            3. SI TU REPÈRES DES NUMÉROS MANQUANTS (par exemple, si tu vois Q15 puis Q19), RECHERCHE SPÉCIFIQUEMENT ces questions manquantes.
-            4. Examine minutieusement tout le texte pour trouver les questions qui pourraient être mal formatées ou difficiles à détecter.
-            5. Accorde une attention particulière aux sections de texte qui pourraient contenir les questions Q16, Q17 et Q18 qui sont souvent manquantes.
-
-            Pour chaque question, tu dois fournir :
-            1. Le numéro de la question (par exemple, 1, 2, 3) tel qu'il apparaît dans le document.
-            2. Le texte intégral de la question uniquement (sans les choix de réponses A,B,C,D,E).
-            
-            Contenu Markdown du document à analyser :
-            ---
-            {truncated_content}
-            ---
-
-            Retourne les questions extraites sous la forme d'un objet JSON avec cette structure:
-            {{
-              "questions": [
-                {{"numero": 1, "contenu": "Texte de la question 1"}},
-                {{"numero": 2, "contenu": "Texte de la question 2"}},
-                ...etc pour toutes les questions...
-              ]
-            }}
-            """
-            
+            # Appel à l'API pour extraction des questions
             try:
-                # Utiliser un modèle plus puissant pour l'extraction complète
-                messages = [UserMessage(content=prompt)]
-                response = self._call_api_with_retry(
-                    self.client.chat.complete,
-                    model="mistral-medium-latest", 
-                    messages=messages,
-                    temperature=0.0,
-                    response_format={"type": "json_object"}
+                max_questions_in_section = 15  # Limite raisonnable par section
+                
+                # Détecter les questions avec un regex de base d'abord
+                potential_questions = re.findall(r'(?:Q(?:uestion)?\s*(\d+)|^(\d+)\s*[\.\)])', section["content"], re.MULTILINE)
+                flattened_matches = [int(num) for match in potential_questions for num in match if num]
+                unique_detected_nums = set(flattened_matches)
+                
+                detected_count = len(unique_detected_nums)
+                
+                if detected_count > max_questions_in_section:
+                    print(f"    ⚠️ Détecté {detected_count} numéros de questions potentielles, ce qui semble élevé. Limitation aux {max_questions_in_section} premiers.")
+                    prompt_data["max_questions"] = max_questions_in_section
+                
+                questions_api_result = self._call_api_with_retry(
+                    self._extract_questions_api,
+                    content=prompt_data["content"],
+                    section_index=index
                 )
                 
-                # Vérifier si l'appel API a échoué
-                if response is None:
-                    print("    ❌ Échec de l'appel API pour l'extraction globale des questions")
-                    # Continuer avec les autres méthodes d'extraction
-                    pass
-                elif response.choices and response.choices[0].message and response.choices[0].message.content:
-                    extracted_data_str = response.choices[0].message.content
-                    try:
-                        raw_data = json.loads(extracted_data_str)
-                        if isinstance(raw_data, dict) and "questions" in raw_data and isinstance(raw_data["questions"], list):
-                            all_questions_from_all_pages_api_data = raw_data["questions"]
-                            print(f"    ✅ Extraction globale réussie: {len(all_questions_from_all_pages_api_data)} questions trouvées")
-                    except json.JSONDecodeError as e_json:
-                        print(f"    ⚠️ Erreur JSON dans l'extraction globale: {e_json}")
-                else:
-                    print(f"    ⚠️ Réponse API invalide pour l'extraction globale")
-            except Exception as e_api:
-                print(f"    🔥 Erreur API pour l'extraction globale: {str(e_api)}")
-        
-        # Si l'extraction globale a échoué ou n'a pas été tentée, traiter page par page
-        if not all_questions_from_all_pages_api_data:
-            print(f"📄 Traitement page par page ({len(page_sections)} sections)...")
-            
-            for i, page_markdown_content in enumerate(page_sections):
-                print(f"📄 Traitement section {i + 1}/{len(page_sections)} pour questions...")
-                
-                if not page_markdown_content.strip():
-                    print(f"    ⏩ Section de page {i + 1} vide, ignorée pour questions.")
-                    continue
-
-                truncated_page_markdown = page_markdown_content[:25000]
-
-                # Ajouter une instruction spécifique pour chercher les questions souvent manquantes
-                prompt = f"""Tu es un expert en analyse de QCM (Questionnaires à Choix Multiples).
-                À partir du contenu Markdown d'une section de page d'un document QCM fourni ci-dessous, identifie et extrais chaque question.
-
-                INSTRUCTIONS CRUCIALES:
-                1. Cherche ATTENTIVEMENT toutes les questions, particulièrement les questions Q16, Q17 et Q18 qui sont souvent manquantes.
-                2. Examine chaque paragraphe, même ceux qui semblent mal formatés.
-                3. Une question commence généralement par "Q" suivi d'un numéro (ex: Q16, Q17).
-                4. Assure-toi de ne manquer AUCUNE question, même si elle est mal formatée.
-
-                Pour chaque question, tu dois fournir :
-                1. Le numéro de la question (par exemple, 1, 2, 3) tel qu'il apparaît sur la page.
-                2. Le texte intégral de la question. Cela inclut toute phrase d'introduction ou contexte faisant partie de la question elle-même.
-                   EXCLUS IMPÉRATIVEMENT : Les options à choix multiples (A,B,C,D,E), les corrections, ou les justifications.
-                
-                IMPORTANT: Assure-toi d'extraire TOUTES les questions présentes dans ce texte, même si elles semblent incomplètes.
-
-                Contenu Markdown de la section de page à analyser :
-                ---
-                {truncated_page_markdown}
-                ---
-
-                Retourne les questions extraites sous la forme d'un objet JSON. Cet objet doit contenir une unique clé "questions",
-                dont la valeur est une liste d'objets. Chaque objet dans la liste représente une question et doit avoir
-                les clés "numero" (un entier) et "contenu" (une chaîne de caractères pour le texte de la question).
-                Si aucune question n'est trouvée sur cette section de page, la liste "questions" doit être vide.
-
-                Exemple de format de retour attendu :
-                {{
-                  "questions": [
-                    {{"numero": 1, "contenu": "Quelle est la formule chimique de l'eau ?"}},
-                    {{"numero": 2, "contenu": "Concernant la photosynthèse, laquelle des affirmations suivantes est correcte ?"}}
-                  ]
-                }}
-                """
-                try:
-                    messages = [UserMessage(content=prompt)]
-                    response = self._call_api_with_retry(
-                        self.client.chat.complete,
-                        model="mistral-small-latest", 
-                        messages=messages,
-                        temperature=0.0,
-                        response_format={"type": "json_object"}
-                    )
-                    
-                    # Vérifier si l'appel API a échoué
-                    if response is None:
-                        print(f"    ❌ Échec de l'appel API pour l'extraction de la section {i+1}")
-                        continue
-                    
-                    if response.choices and response.choices[0].message and response.choices[0].message.content:
-                        extracted_data_str = response.choices[0].message.content
+                # Valider et nettoyer les résultats
+                if questions_api_result:
+                    # Filtrer et normaliser les données
+                    for q in questions_api_result:
+                        # Si la question n'a pas de numéro, la sauter
+                        if "numero_question" not in q or not q["numero_question"]:
+                            continue
+                        
                         try:
-                            raw_page_data = json.loads(extracted_data_str)
-                            page_questions_list = []
-                            if isinstance(raw_page_data, dict):
-                                page_questions_list = raw_page_data.get("questions", [])
-                            elif isinstance(raw_page_data, list): 
-                                page_questions_list = raw_page_data
+                            numero = int(q["numero_question"])
                             
-                            if not isinstance(page_questions_list, list):
-                                print(f"    ⚠️ Format de questions inattendu pour section {i+1} (pas une liste). Reçu: {page_questions_list}")
+                            # Vérifier si cette question est dans une page remplacée et déjà extraite d'ailleurs
+                            if has_replaced_content and numero in replaced_questions and numero in unique_question_numbers:
+                                print(f"    🔍 Question {numero} déjà extraite, ignorée car doublon dans contenu remplacé")
                                 continue
                             
-                            # Déballage amélioré de la liste des questions
-                            actual_questions_for_page = []
-                            if not page_questions_list: # Gère une liste vide retournée par .get("questions", []) ou par l'API
-                                pass # actual_questions_for_page reste vide
-                            elif len(page_questions_list) == 1 and \
-                                 isinstance(page_questions_list[0], dict) and \
-                                 "questions" in page_questions_list[0] and \
-                                 isinstance(page_questions_list[0]["questions"], list):  # Gérer le cas où l'API retourne un dict imbriqué
-                                actual_questions_for_page = page_questions_list[0]["questions"]
-                            else:
-                                actual_questions_for_page = page_questions_list
+                            # Ajouter la question
+                            question_data = {
+                                "numero": numero,
+                                "contenu": {"text": q.get("texte_question", "")},
+                                "qcm_id": qcm_id,
+                                "section_index": index,
+                                "page_num": section.get("page_num", index+1)
+                            }
                             
-                            # Ajouter les questions de cette page
-                            print(f"    ✅ {len(actual_questions_for_page)} questions trouvées dans la section {i+1}")
-                            all_questions_from_all_pages_api_data.extend(actual_questions_for_page)
-                        except json.JSONDecodeError as e:
-                            print(f"    ⚠️ Erreur JSON dans l'extraction pour la section {i+1}: {str(e)}")
-                    else:
-                        print(f"    ⚠️ Réponse API invalide pour la section {i+1}")
-                except Exception as e:
-                    print(f"    ⚠️ Erreur lors de l'extraction des questions pour la section {i+1}: {str(e)}")
+                            all_questions_data.append(question_data)
+                            unique_question_numbers.add(numero)
+                            question_numbers_sequence.append(numero)
+                        except (ValueError, TypeError) as e:
+                            print(f"    ⚠️ Erreur de traitement pour la question: {str(e)}")
                 
-                time.sleep(2)  # Réduit à 2 secondes au lieu de 5
-
-        # Après avoir extrait toutes les questions, vérifier s'il y a des numéros manquants
-        all_questions = all_questions_from_all_pages_api_data
+                print(f"    ✅ {len(questions_api_result) if questions_api_result else 0} questions trouvées dans la section {index+1}")
+                
+            except Exception as e:
+                print(f"    ⚠️ Erreur lors de l'extraction des questions de la section {index+1}: {str(e)}")
         
-        # Trier les questions par numéro
-        all_questions.sort(key=lambda q: q["numero"] if isinstance(q["numero"], int) else int(q["numero"]))
+        # Supprimer les doublons basés sur le numero de question
+        questions_deduplicated = {}
+        for q in all_questions_data:
+            q_num = q["numero"]
+            if q_num not in questions_deduplicated:
+                questions_deduplicated[q_num] = q
         
-        # Vérifier s'il manque des numéros de questions (trous dans la séquence)
-        if all_questions:
-            question_numbers = [q["numero"] if isinstance(q["numero"], int) else int(q["numero"]) for q in all_questions]
-            expected_numbers = list(range(min(question_numbers), max(question_numbers) + 1))
-            missing_numbers = set(expected_numbers) - set(question_numbers)
+        # Tri par numéro de question
+        sorted_questions = [questions_deduplicated[num] for num in sorted(questions_deduplicated.keys())]
+        
+        # Vérifier s'il manque des questions dans la séquence
+        if sorted_questions:
+            questions_sequence = sorted([q["numero"] for q in sorted_questions])
+            expected_seq = list(range(min(questions_sequence), max(questions_sequence) + 1))
+            missing_questions = [q for q in expected_seq if q not in questions_sequence]
             
-            if missing_numbers:
-                print(f"⚠️ ATTENTION: Questions manquantes détectées: {sorted(missing_numbers)}")
+            if missing_questions:
+                print(f"⚠️ ATTENTION: Questions manquantes détectées: {missing_questions}")
                 print(f"   Vérifiez le PDF source pour ces questions.")
         
-        if not all_questions_from_all_pages_api_data:
-            print("ℹ️ Aucune question trouvée dans le document après traitement de toutes les pages.")
-            return []
-
-        print(f"📊 Total de {len(all_questions_from_all_pages_api_data)} questions collectées (brutes API).")
+        print(f"📊 Total de {len(all_questions_data)} questions collectées (brutes API).")
+        # Avertissement des questions manquantes
+        if sorted_questions:
+            questions_nums = [q["numero"] for q in sorted_questions]
+            expected_range = list(range(min(questions_nums), max(questions_nums) + 1))
+            missing = [n for n in expected_range if n not in questions_nums]
+            if missing:
+                print(f"⚠️ Questions manquantes dans la séquence: {missing}")
         
-        # Déduplication des questions par numéro
-        # Nous conservons la question avec le contenu le plus long pour chaque numéro
-        questions_by_number = {}
-        for q_api_data in all_questions_from_all_pages_api_data:
-            if not isinstance(q_api_data, dict):
-                continue
-            
-            try:
-                numero = int(q_api_data["numero"])
-                contenu_text = str(q_api_data["contenu"]).strip()
-                
-                if not contenu_text:
-                    print(f"⚠️ Contenu de question vide pour numéro {numero} (API), ignoré.")
-                    continue
-                
-                # Si le numéro existe déjà, garde la version avec le contenu le plus long
-                if numero in questions_by_number:
-                    existing_content = questions_by_number[numero]["contenu"]
-                    if len(contenu_text) > len(existing_content):
-                        questions_by_number[numero] = {"numero": numero, "contenu": contenu_text}
-                else:
-                    questions_by_number[numero] = {"numero": numero, "contenu": contenu_text}
-                
-            except (ValueError, TypeError) as e:
-                print(f"⚠️ Erreur de type/valeur pour q API data {q_api_data}: {e}")
-                continue
-        
-        # Vérifier s'il y a des écarts dans les numéros de questions
-        all_question_numbers = sorted(questions_by_number.keys())
-        if all_question_numbers:
-            expected_range = list(range(min(all_question_numbers), max(all_question_numbers) + 1))
-            missing_questions = set(expected_range) - set(all_question_numbers)
-            if missing_questions:
-                print(f"⚠️ Questions manquantes dans la séquence: {sorted(missing_questions)}")
-        
-        # Créer liste finale pour insertion, en filtrant les questions déjà existantes
-        questions_to_insert_in_supabase = []
-        for numero, q_data in questions_by_number.items():
-            # Ne pas réinsérer les questions qui existent déjà
-            if numero in existing_question_numbers:
-                print(f"ℹ️ Question {numero} existe déjà, ignorée pour insertion.")
-                continue
-                
-            questions_to_insert_in_supabase.append({
-                "qcm_id": qcm_id,
-                "numero": numero, 
-                "contenu": json.dumps({"text": q_data["contenu"]}),  # Converti en JSON pour le champ jsonb
-                "uuid": str(uuid.uuid4()) 
-            })
-
+        # Sauvegarder les questions dans Supabase
         saved_questions_details = []
         
-        # Si certaines questions existent déjà, récupérer leurs détails
-        if existing_question_numbers:
+        if sorted_questions:
+            # Étape 1: Récupérer les questions existantes pour ce qcm_id
+            existing_questions_db = {}
             try:
-                for numero in existing_question_numbers:
-                    result = self.supabase.table("questions").select("id", "uuid").eq("qcm_id", qcm_id).eq("numero", numero).execute()
-                    if result.data:
-                        for q in result.data:
-                            saved_questions_details.append({
-                                "db_uuid": q.get("id"),
-                                "qcm_id": qcm_id,
-                                "numero": numero
-                            })
-            except Exception as e:
-                print(f"⚠️ Erreur lors de la récupération des questions existantes: {str(e)}")
-        
-        # Insérer les nouvelles questions
-        if questions_to_insert_in_supabase:
-            print(f"💾 Sauvegarde de {len(questions_to_insert_in_supabase)} nouvelles questions dans Supabase...")
-            try:
-                # Insertion par lots pour améliorer les performances
-                chunk_size = 50
-                for i in range(0, len(questions_to_insert_in_supabase), chunk_size):
-                    chunk = questions_to_insert_in_supabase[i:i + chunk_size]
-                    result_q = self.supabase.table("questions").insert(chunk).execute()
-                    
-                    if result_q.data:
-                        print(f"✅ Lot de {len(result_q.data)} questions sauvegardé dans Supabase.")
-                        for db_q_data in result_q.data:
-                            saved_questions_details.append({
-                                "db_uuid": db_q_data.get("id"),
-                                "qcm_id": db_q_data.get("qcm_id"), 
-                                "numero": db_q_data.get("numero")  
-                            })
-                    else:
-                        print(f"⚠️ Aucune donnée retournée par Supabase pour un lot de {len(chunk)} questions.")
-            except Exception as e_insert_q: 
-                print(f"🔥 Erreur lors de l\'insertion des questions dans Supabase: {str(e_insert_q)}")
+                print(f"    🔍 Vérification des questions existantes pour QCM ID: {qcm_id}...")
+                result = self.supabase.table("questions").select("id, numero, uuid").eq("qcm_id", qcm_id).execute()
+                if result.data:
+                    for q_db in result.data:
+                        existing_questions_db[q_db["numero"]] = {"id": q_db["id"], "uuid": q_db["uuid"]}
+                    print(f"    ℹ️ {len(existing_questions_db)} questions existantes trouvées pour ce QCM.")
+                    # Log des UUIDs existants
+                    # for numero, details in existing_questions_db.items():
+                    #    print(f"        [EXISTING Q] Numero: {numero}, UUID: {details['uuid']}")
+            except Exception as e_fetch_existing_q:
+                print(f"    🔥 Erreur lors de la vérification des questions existantes: {str(e_fetch_existing_q)}")
+            
+            questions_to_insert_api = []
+            
+            for q_extracted in sorted_questions:
+                numero = q_extracted.get("numero")
+                if numero in existing_questions_db:
+                    # Question existante, ajouter ses détails (y compris l'UUID de la BD)
+                    saved_questions_details.append({
+                        "db_uuid": existing_questions_db[numero]["uuid"], # Important: UUID de la BD
+                        "db_id": existing_questions_db[numero]["id"],     # ID entier de la BD
+                        "qcm_id": qcm_id,
+                        "numero": numero,
+                        "texte": q_extracted.get("texte_question"),
+                        "page_document": q_extracted.get("page_document")
+                    })
+                    print(f"        [LOG saved_details - Existant] Q {numero} -> UUID: {existing_questions_db[numero]['uuid']}")
+
+                else:
+                    # Nouvelle question
+                    q_extracted["uuid"] = str(uuid.uuid4()) # Attribuer un nouvel UUID seulement si nouvelle
+                    questions_to_insert_api.append({
+                        "qcm_id": q_extracted["qcm_id"],
+                        "numero": q_extracted["numero"],
+                        "uuid": q_extracted["uuid"],
+                        "contenu": q_extracted["contenu"]
+                    })
+            
+            if questions_to_insert_api:
+                print(f"    💾 Sauvegarde de {len(questions_to_insert_api)} NOUVELLES questions dans Supabase...")
+                # Diviser en batches pour l'insertion
+                batch_size = 50 # Peut être ajusté
+                
+                for i in range(0, len(questions_to_insert_api), batch_size):
+                    chunk = questions_to_insert_api[i:i+batch_size]
+                    try:
+                        insert_result = self.supabase.table("questions").insert(chunk).execute()
+                        if insert_result.data:
+                            for q_inserted in insert_result.data:
+                                saved_questions_details.append({
+                                    "db_uuid": q_inserted.get("uuid"),
+                                    "db_id": q_inserted.get("id"),
+                                    "qcm_id": q_inserted.get("qcm_id"),
+                                    "numero": q_inserted.get("numero"),
+                                    "texte": q_inserted.get("texte"), # Assumant que l'API insert retourne le texte
+                                    "page_document": q_inserted.get("page_document") # Idem
+                                })
+                                print(f"        [LOG saved_details - Nouveau] Q {q_inserted.get('numero')} -> UUID: {q_inserted.get('uuid')}")
+                        else:
+                            print(f"    ⚠️ Aucune donnée retournée par Supabase pour un lot de {len(chunk)} nouvelles questions.")
+                    except Exception as e_insert_q_new:
+                        print(f"    🔥 Erreur lors de l\'insertion de NOUVELLES questions: {str(e_insert_q_new)}")
+            else:
+                print("    ℹ️ Aucune nouvelle question à insérer. Toutes les questions extraites existaient déjà.")
         else:
-            print("ℹ️ Aucune nouvelle question à sauvegarder.")
+            print("    ℹ️ Aucune question extraite de l'API à traiter.")
         
-        # Filtrer les entrées incomplètes
+        # Filtrer les entrées incomplètes ou celles où db_id/db_uuid pourrait être None
         saved_questions_details = [
             q for q in saved_questions_details 
             if q.get("db_uuid") and q.get("qcm_id") is not None and q.get("numero") is not None
@@ -976,34 +1098,32 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         question_count = len(saved_questions_details)
         print(f"📝 Phase 2: Extraction des propositions pour {question_count} questions du QCM ID: {qcm_id}...")
 
-        # Récupérer les UUIDs actuels des questions directement depuis Supabase
-        try:
-            print(f"🔍 Récupération des IDs des questions depuis Supabase pour le QCM ID: {qcm_id}...")
-            result = self.supabase.table("questions").select("id", "uuid", "numero").eq("qcm_id", qcm_id).execute()
-            
-            if not result.data:
-                print(f"⚠️ Aucune question trouvée dans Supabase pour le QCM ID: {qcm_id}")
-                return
+        # Utiliser saved_questions_details COMME SOURCE PRINCIPALE pour le mappage UUID
+        question_uuid_map_by_numero = {}
+        if not saved_questions_details:
+            print("⚠️ saved_questions_details est vide. Impossible de mapper les numéros de question aux UUIDs.")
+            print("   Cela peut se produire si la phase d'extraction des questions n'a rien retourné ou a échoué.")
+            return # Arrêt si aucune information de question n'est disponible
+
+        for q_detail in saved_questions_details:
+            numero = q_detail.get("numero")
+            # CORRECTION CRUCIALE ICI: Utiliser "db_id" qui contient la PK UUID de la table 'questions'
+            # au lieu de "db_uuid" qui contenait l'autre colonne UUID.
+            question_pk_uuid = q_detail.get("db_id") 
+            if numero is not None and question_pk_uuid is not None:
+                question_uuid_map_by_numero[numero] = question_pk_uuid
+            else:
+                print(f"⚠️ Détail de question incomplet dans saved_questions_details: {q_detail}. PK UUID (db_id) ou numéro manquant.")
+
+        if not question_uuid_map_by_numero:
+            print("❌ Impossible de construire le mappage Numéro de Question -> PK UUID à partir de saved_questions_details.")
+            print("   Assurez-vous que _extract_and_save_questions_only retourne des détails valides avec 'numero' et 'db_id'.")
+            return
                 
-            # Création du mappage par numéro
-            question_map_by_numero = {}
-            for q in result.data:
-                if "numero" in q and "id" in q and q["numero"] is not None and q["id"] is not None:
-                    question_map_by_numero[q["numero"]] = q["id"]
-            
-            question_id_list = [q["id"] for q in result.data if "id" in q and q["id"] is not None]
-            
-            print(f"📌 {len(question_map_by_numero)} questions mappées par numéro depuis Supabase.")
-            
-            if not question_map_by_numero:
-                print("⚠️ Aucune question n'a pu être mappée par numéro depuis Supabase.")
-                return
-                
-        except Exception as e:
-            print(f"🔥 Erreur lors de la récupération des IDs des questions depuis Supabase: {str(e)}")
-            question_map_by_numero = {q["numero"]: q["db_id"] for q in saved_questions_details if q.get("numero") is not None and q.get("db_id")}
-            question_id_list = [q["db_id"] for q in saved_questions_details if q.get("db_id")]
-            print(f"📌 Utilisation du mappage fourni en argument (fallback): {len(question_map_by_numero)} questions")
+        print(f"📌 {len(question_uuid_map_by_numero)} questions mappées (numéro -> PK UUID) en utilisant saved_questions_details.")
+        # Log détaillé du mapping
+        # for num, uid in question_uuid_map_by_numero.items():
+        #    print(f"        [MAP] Q {num} -> UUID {uid}")
 
         # Diviser le document en sections
         page_sections = []
@@ -1034,7 +1154,8 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         all_propositions = []
         
         # Liste des numéros de questions pour lesquelles on recherche des propositions
-        missing_questions = set(question_map_by_numero.keys())
+        # Utiliser les numéros des questions pour lesquelles on a un UUID
+        missing_questions = set(question_uuid_map_by_numero.keys())
         
         # OPTIMISATION: Traiter les sections par groupes pour réduire les appels API
         # Regrouper les sections en batch de 2-3 pour réduire le nombre d'appels API tout en gardant un contexte pertinent
@@ -1097,7 +1218,7 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                     print(f" | ✓ {len(question_nums)} question(s) traitées")
             else:
                 # Fallback - essayer avec le prompt simplifié seulement si on a moins de 50% des questions
-                if len(missing_questions) > len(question_map_by_numero) / 2:
+                if len(missing_questions) > len(question_uuid_map_by_numero) / 2:
                     extracted_props_fallback = self._extract_propositions_with_api(
                         batch_content, 
                         prompt_type="simplified",
@@ -1188,10 +1309,12 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         
         for prop_set in all_propositions:
             question_num = prop_set.get("numero_question")
-            if question_num not in question_map_by_numero:
+            # Utiliser le mappage numero -> uuid
+            if question_num not in question_uuid_map_by_numero:
+                print(f"⚠️  Proposition pour Q{question_num} ignorée car UUID de question non trouvé dans le mappage.")
                 continue
                 
-            question_id = question_map_by_numero[question_num]
+            question_uuid_for_reponse = question_uuid_map_by_numero[question_num] # UUID de la question
             propositions = prop_set.get("propositions", {})
             
             for lettre, texte in propositions.items():
@@ -1199,12 +1322,12 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                     texte_clean = str(texte).strip()
                     if texte_clean:
                         all_reponses_to_insert.append({
-                            "question_id": question_id,  # Maintenant contient l'ID de la question et non l'UUID
+                            "question_id": question_uuid_for_reponse,  # UTILISER L'UUID ICI
                             "lettre": lettre,
-                            "contenu": json.dumps({"text": texte_clean}),  # Converti en JSON pour le champ jsonb
+                            "contenu": json.dumps({"text": texte_clean}),
                             "uuid": str(uuid.uuid4()),
-                            "est_correcte": False,
-                            "latex": None
+                            "est_correcte": False, # Sera mis à jour plus tard
+                            "latex": None # Ou extraire si disponible
                         })
 
         # Insertion des propositions dans Supabase
@@ -1218,31 +1341,55 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
             print("✅ Toutes les questions ont des propositions!")
 
         if all_reponses_to_insert:
-            print(f"💾 Sauvegarde de {len(all_reponses_to_insert)} propositions dans Supabase...")
-            
-            # Insertion par lots plus grands pour améliorer les performances
-            chunk_size = 100  # Augmenter la taille des lots
-            total_inserted = 0
-            chunks = len(all_reponses_to_insert) // chunk_size + (1 if len(all_reponses_to_insert) % chunk_size > 0 else 0)
-            
-            print(f"⌛ [{'·' * chunks}] 0% - Insertion des propositions")
-            
-            for i in range(0, len(all_reponses_to_insert), chunk_size):
-                chunk = all_reponses_to_insert[i:i + chunk_size]
+            # ÉTAPE DE DÉDUPLICATION AVANT INSERTION
+            print(f"🔍 Vérification des propositions existantes avant insertion pour éviter les doublons...")
+            final_propositions_to_insert = []
+            existing_props_cache = {} # Cache pour question_id -> set de lettres existantes
+
+            for prop_to_check in tqdm(all_reponses_to_insert, desc="Déduplication des propositions", unit="prop"):
+                q_uuid = prop_to_check["question_id"]
+                lettre = prop_to_check["lettre"]
+
+                if q_uuid not in existing_props_cache:
+                    try:
+                        result = self.supabase.table("reponses").select("lettre").eq("question_id", q_uuid).execute()
+                        existing_props_cache[q_uuid] = {p["lettre"] for p in result.data} if result.data else set()
+                    except Exception as e_fetch_props:
+                        print(f"\n    🔥 Erreur lors de la récupération des propositions existantes pour Q_UUID {q_uuid}: {e_fetch_props}")
+                        existing_props_cache[q_uuid] = set() # Supposer qu'il n'y en a pas pour continuer
                 
-                progress = int((i / len(all_reponses_to_insert)) * 100)
-                progress_bar = '█' * (i // chunk_size) + '·' * (chunks - (i // chunk_size))
-                print(f"\r⌛ [{progress_bar}] {progress}% - Insertion des propositions", end="")
-                
-                try:
-                    result = self.supabase.table("reponses").insert(chunk).execute()
-                    if result.data:
-                        total_inserted += len(result.data)
-                except Exception as e:
-                    print(f"\n    🔥 Erreur lors de l'insertion d'un chunk: {str(e)}")
-                    # Continuer avec le prochain chunk plutôt que d'abandonner
+                if lettre not in existing_props_cache[q_uuid]:
+                    final_propositions_to_insert.append(prop_to_check)
+                    existing_props_cache[q_uuid].add(lettre) # Ajouter au cache pour ce batch
+                # else:
+                    # print(f"    [DEDUPLICATION] Proposition {lettre} pour Q_UUID {q_uuid} existe déjà. Ignorée.")
             
-            print(f"\n✅ {total_inserted} propositions sauvegardées dans Supabase")
+            if not final_propositions_to_insert:
+                print("ℹ️ Aucune nouvelle proposition à insérer après déduplication.")
+            else:
+                print(f"💾 Sauvegarde de {len(final_propositions_to_insert)} NOUVELLES propositions dans Supabase (après déduplication)...")
+                
+                chunk_size = 100
+                total_inserted = 0
+                num_chunks = (len(final_propositions_to_insert) + chunk_size - 1) // chunk_size
+
+                with tqdm(total=num_chunks, desc="Insertion des nouvelles propositions", unit="chunk") as pbar_chunks:
+                    for i in range(0, len(final_propositions_to_insert), chunk_size):
+                        chunk = final_propositions_to_insert[i:i + chunk_size]
+                        try:
+                            result = self.supabase.table("reponses").insert(chunk).execute()
+                            if result.data:
+                                total_inserted += len(result.data)
+                        except Exception as e:
+                            print(f"\n    🔥 Erreur lors de l'insertion d'un chunk de nouvelles propositions: {str(e)}")
+                            problematic_question_uuids_in_chunk = list(set([p.get('question_id') for p in chunk]))
+                            print(f"        UUIDs des questions dans le chunk problématique: {problematic_question_uuids_in_chunk}")
+                        pbar_chunks.update(1)
+                
+                if total_inserted > 0:
+                    print(f"\n✅ {total_inserted} NOUVELLES propositions sauvegardées dans Supabase.")
+                else:
+                    print("\n⚠️ Aucune nouvelle proposition n'a été sauvegardée avec succès.")
             
             # Ajouter des statistiques sur les performances
             end_time = datetime.datetime.now()
@@ -1256,101 +1403,86 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
         print("🏁 Phase 2 terminée.")
     
     def _extract_propositions_with_api(self, content: str, prompt_type: str = "standard", section_index: int = 0) -> List[Dict]:
-        """Méthode générique pour extraire les propositions via l'API Mistral."""
-        # Tronquer le contenu pour respecter les limites de l'API
-        truncated_content = content[:25000]  # Augmenté à 25K caractères pour couvrir plus de contenu
+        """Extrait les propositions d'un texte en utilisant l'API LLM."""
         
-        # Construire le prompt en fonction du type demandé
-        if prompt_type == "optimized":
-            # Version optimisée pour traiter plusieurs sections en même temps
-            prompt = f"""
-            Tu es un expert en extraction de propositions de QCM médical.
+        # Vérifier si cette section contient du contenu remplacé
+        has_replaced_content = "<!-- REPLACED_CONTENT:START -->" in content and "<!-- REPLACED_CONTENT:END -->" in content
+        
+        # Si c'est un contenu remplacé, indiquer cela dans le prompt
+        instruction_remplace = ""
+        if has_replaced_content:
+            instruction_remplace = "\n\nATTENTION: Ce contenu contient des questions qui ont été remplacées manuellement (entre les balises REPLACED_CONTENT). Traite-les avec soin et vérifie de bien extraire les bonnes propositions pour ces questions."
+        
+        prompt = ""
+        if prompt_type == "standard" or prompt_type == "optimized":
+            # Prompt optimisé avec plus de contexte et d'exemples
+            prompt = f"""Tu es un analyseur expert de QCM médicaux. Ton rôle est d'extraire les propositions de réponses pour chaque question d'un examen médical.{instruction_remplace}
+
+INSTRUCTIONS ESSENTIELLES:
+1. Pour CHAQUE question, identifie TOUTES les propositions de réponses (généralement marquées par A, B, C, D, E)
+2. Assure-toi d'associer correctement les propositions à leur numéro de question
+3. Extrais UNIQUEMENT le texte des propositions, pas les réponses correctes ni les explications
+
+Pour chaque question, je veux:
+- Le numéro de la question
+- Les propositions sous forme de dictionnaire avec lettre => texte
+
+===== EXEMPLE DE RÉSULTAT ATTENDU =====
+[
+  {{
+    "numero_question": 1,
+    "propositions": {{
+      "A": "Texte proposition A",
+      "B": "Texte proposition B",
+      "C": "Texte proposition C",
+      "D": "Texte proposition D",
+      "E": "Texte proposition E"
+    }}
+  }},
+  {{
+    "numero_question": 2,
+    "propositions": {{
+      "A": "Texte proposition A pour Q2",
+      ...et ainsi de suite...
+    }}
+  }}
+]
+
+===== CONTENU À ANALYSER =====
+{content}
+"""
+        elif prompt_type == "simplified":
+            # Prompt simplifié pour les cas difficiles
+            prompt = f"""Extrais simplement les propositions de réponses (A, B, C, D, E) pour chaque question numérotée dans ce document.{instruction_remplace}
+
+Format de résultat attendu:
+[
+  {{
+    "numero_question": 1,
+    "propositions": {{
+      "A": "Texte A",
+      "B": "Texte B",
+      ...
+    }}
+  }},
+  ...
+]
+
+Contenu:
+{content}
+"""
             
-            MISSION:
-            Analyse le texte ci-dessous qui contient plusieurs sections d'un QCM et identifie:
-            1. Les numéros de toutes les questions présentes (nombres comme 1, 2, 33, etc.)
-            2. Pour chaque question, extrais TOUTES ses propositions A, B, C, D, E
-            
-            INSTRUCTIONS IMPORTANTES:
-            - Le texte peut contenir plusieurs sections séparées par "==== NOUVELLE SECTION ===="
-            - Chaque section peut contenir différentes questions ou parties de questions
-            - Certaines propositions peuvent être sur une section et d'autres sur une autre section
-            - Sois exhaustif! Ne manque AUCUNE proposition. C'est critique pour la suite du processus.
-            - Les propositions peuvent avoir divers formats: "A. texte", "A : texte", "A) texte", etc.
-            - Une question peut avoir ses propositions sur différentes sections (ex: page 1 et page 2)
-            
-            Texte à analyser:
-            ---
-            {truncated_content}
-            ---
-            
-            FORMAT DE RÉPONSE:
-            Retourne uniquement un objet JSON avec cette structure précise:
-            [
-              {{
-                "numero_question": 1,
-                "propositions": {{"A": "texte A", "B": "texte B", "C": "texte C", "D": "texte D", "E": "texte E"}}
-              }},
-              {{
-                "numero_question": 2,
-                "propositions": {{"A": "texte A", "B": "texte B", "C": "texte C", "D": "texte D", "E": "texte E"}}
-              }},
-              ...
-            ]
-            """
-        elif prompt_type == "standard":
-            prompt = f"""
-            Tu es un expert en extraction de propositions de QCM.
-            
-            MISSION:
-            Analyse le texte ci-dessous extrait d'un QCM et identifie:
-            1. Les numéros des questions présentes (nombres comme 1, 2, 33, etc.)
-            2. Pour chaque question, extrais ses propositions A, B, C, D, E
-            
-            ATTENTION:
-            - Les propositions peuvent être formatées différemment: "A. texte", "A : texte", "A) texte", etc.
-            - Parfois, une page peut ne contenir que des propositions sans le numéro de question explicite
-            - Utilise le contexte pour déterminer à quelle question appartiennent les propositions
-            - Sois exhaustif et ne manque aucune proposition
-            
-            Texte à analyser:
-            ---
-            {truncated_content}
-            ---
-            
-            Retourne un JSON avec cette structure:
-            {{
-              "propositions": [
-                {{
-                  "numero_question": 1,
-                  "propositions": {{"A": "texte A", "B": "texte B", "C": "texte C", "D": "texte D", "E": "texte E"}}
-                }},
-                ...
-              ]
-            }}
-            """
-        else:  # prompt_type == "simplified"
-            prompt = f"""
-            Analyse ce texte de QCM et extrais:
-            1. Les numéros de questions
-            2. Les propositions A, B, C, D, E pour chaque question
-            
-            Texte:
-            {truncated_content}
-            
-            Format JSON attendu:
-            [
-              {{
-                "numero_question": 1,
-                "propositions": {{"A": "texte A", "B": "texte B", "C": "texte C", "D": "texte D", "E": "texte E"}}
-              }}
-            ]
-            """
+        # Tronquer si trop long
+        max_tokens = 25000
+        if len(prompt) > max_tokens:
+            prompt = prompt[:max_tokens]
         
         try:
-            # Utiliser le modèle small pour les extractions standard, medium pour l'optimisé
-            model = "mistral-medium-latest" if prompt_type == "optimized" else "mistral-small-latest"
-            
+            # Utiliser un modèle adapté à la longueur et complexité
+            model = "mistral-small-latest"
+            if len(prompt) > 15000:
+                model = "mistral-medium-latest"  # Plus robuste pour les contenus longs
+                
             messages = [UserMessage(content=prompt)]
             response = self._call_api_with_retry(
                 self.client.chat.complete,
@@ -1362,65 +1494,136 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
             
             # Vérifier si l'appel API a échoué
             if response is None:
-                print(f"    ❌ Échec de l'appel API pour l'extraction des propositions de la section {section_index}")
+                print(f"    ❌ Échec de l'appel API pour extraire les propositions (section {section_index})")
                 return []
             
             if response.choices and response.choices[0].message and response.choices[0].message.content:
-                response_text = response.choices[0].message.content
-                print(f"    🔍 [DEBUG] Réponse API section {section_index}: {response_text[:200]}...")
-                
+                extracted_data_str = response.choices[0].message.content
                 try:
-                    data = json.loads(response_text)
-                    props_list = []
+                    print(f"    🔍 [DEBUG] Réponse API section {section_index}: {extracted_data_str[:500]}...")
                     
-                    # Gérer plusieurs formats possibles
-                    if isinstance(data, dict) and "propositions" in data:
-                        # Format standard {"propositions": [...]}
-                        props_list = data["propositions"]
-                    elif isinstance(data, list):
-                        # Format brut [{"numero_question": 1, "propositions": {...}}]
-                        # ou format spécial [{"propositions": [{}, {}]}]
-                        for item in data:
-                            if isinstance(item, dict):
-                                if "propositions" in item and isinstance(item["propositions"], list):
-                                    # Format [{"propositions": [{}, {}]}]
-                                    props_list.extend(item["propositions"])
-                                elif "numero_question" in item and "propositions" in item:
-                                    # Format [{"numero_question": 1, "propositions": {...}}]
-                                    props_list.append(item)
+                    # Extraire les données JSON
+                    extracted_data = json.loads(extracted_data_str)
                     
-                    if isinstance(props_list, list) and props_list:
-                        # Formater les données pour être cohérent avec notre structure
-                        formatted_props = []
+                    # Normaliser les données (gérer différents formats de réponse)
+                    normalized_data = []
+                    
+                    if isinstance(extracted_data, list):
+                        normalized_data = extracted_data
+                    elif isinstance(extracted_data, dict):
+                        if "questions" in extracted_data:
+                            normalized_data = extracted_data["questions"]
+                        elif "propositions" in extracted_data:
+                            normalized_data = extracted_data["propositions"]
+                        else:
+                            # Essayer d'extraire une liste à partir des clés
+                            for key, value in extracted_data.items():
+                                if isinstance(value, dict) and "propositions" in value:
+                                    try:
+                                        q_num = int(key.replace("question_", "").replace("q", ""))
+                                        normalized_data.append({
+                                            "numero_question": q_num,
+                                            "propositions": value["propositions"]
+                                        })
+                                    except ValueError:
+                                        pass
+                    
+                    # Vérifier si le tableau est encore vide malgré tout
+                    if not normalized_data and isinstance(extracted_data, dict):
+                        # Dernier recours - reconstruction complète
+                        for key in extracted_data:
+                            if "question" in key.lower() and isinstance(extracted_data[key], dict):
+                                try:
+                                    q_num = int(key.replace("question_", "").replace("q", "").strip())
+                                    props_dict = extracted_data[key]
+                                    # Vérifier si l'objet props_dict est utilisable
+                                    if any(k in "ABCDE" for k in props_dict.keys()):
+                                        normalized_data.append({
+                                            "numero_question": q_num,
+                                            "propositions": props_dict
+                                        })
+                                except ValueError:
+                                    pass
+                    
+                    # Filtrer les questions avec des propositions complètes (A-E)
+                    valid_data = []
+                    for item in normalized_data:
+                        # S'assurer que item est un dict et contient les clés requises
+                        if not isinstance(item, dict):
+                            continue
                         
-                        for item in props_list:
-                            if not isinstance(item, dict):
-                                continue
-                                
-                            numero = item.get("numero_question")
-                            props = item.get("propositions")
+                        # Récupérer le numéro de question et les propositions
+                        numero = item.get("numero_question") or item.get("numero") or item.get("question")
+                        propositions = item.get("propositions", {})
+                        
+                        # Si le numéro n'est pas présent ou n'est pas un entier, sauter
+                        if not numero:
+                            continue
+                        
+                        # Convertir en entier si nécessaire
+                        try:
+                            if not isinstance(numero, int):
+                                numero = int(str(numero).strip())
+                        except ValueError:
+                            continue
+                        
+                        # Si les propositions sont une liste, les convertir en dictionnaire
+                        if isinstance(propositions, list):
+                            prop_dict = {}
+                            for i, prop in enumerate(propositions):
+                                if isinstance(prop, dict) and "lettre" in prop and "texte" in prop:
+                                    prop_dict[prop["lettre"]] = prop["texte"]
+                                elif i < 5:  # Limiter à 5 propositions
+                                    lettre = chr(65 + i)  # A, B, C, D, E
+                                    prop_dict[lettre] = str(prop)
+                            propositions = prop_dict
+                        
+                        # S'assurer que propositions est un dictionnaire
+                        if not isinstance(propositions, dict):
+                            continue
+                        
+                        # Ajouter à la liste valide
+                        valid_data.append({
+                            "numero_question": numero,
+                            "propositions": propositions
+                        })
+                    
+                    # Gérer les doublons en vérifiant les remplacements
+                    if has_replaced_content:
+                        # Extraire les numéros de questions qui sont dans la partie remplacée
+                        replaced_matches = re.findall(r'## Q(\d+)\.', content)
+                        replaced_question_nums = [int(m) for m in replaced_matches if m.isdigit()]
+                        
+                        if replaced_question_nums:
+                            print(f"    ℹ️ Questions détectées dans le contenu remplacé: {replaced_question_nums}")
                             
-                            if not numero or not isinstance(props, dict):
-                                continue
-                                
-                            formatted_props.append({
-                                "numero_question": int(numero),
-                                "propositions": props
-                            })
-                        
-                        if formatted_props:
-                            question_nums = [item["numero_question"] for item in formatted_props]
-                            print(f"    ✅ Extraction réussie pour les questions: {question_nums}")
-                            return formatted_props
-                except json.JSONDecodeError:
-                    print(f"    ⚠️ Erreur JSON dans la réponse API section {section_index}")
-            else:
-                print(f"    ⚠️ Réponse API invalide pour section {section_index}")
+                            # Dédupliquer en conservant les données du contenu remplacé en priorité
+                            # Pour chaque numéro de question, on garde une seule entrée en privilégiant 
+                            # celles qui sont dans la liste des questions remplacées
+                            questions_by_number = {}
+                            
+                            # D'abord ajouter toutes les questions
+                            for item in valid_data:
+                                q_num = item["numero_question"]
+                                questions_by_number[q_num] = item
+                            
+                            # Filtrer pour ne garder que les entrées uniques
+                            valid_data = list(questions_by_number.values())
+                    
+                    return valid_data
+
+                except json.JSONDecodeError as e:
+                    print(f"    ⚠️ Erreur JSON dans l'extraction des propositions (section {section_index}): {str(e)}")
+                    return []
+                except Exception as e:
+                    print(f"    ⚠️ Erreur dans le traitement des propositions (section {section_index}): {str(e)}")
+                    return []
         except Exception as e:
-            print(f"    🔥 Erreur API pour section {section_index}: {str(e)}")
+            print(f"    ⚠️ Exception lors de l'appel API pour les propositions (section {section_index}): {str(e)}")
+            return []
         
         return []
-        
+    
     def extract_correct_answers(self, markdown_text: str, qcm_id: int):
         """Identifie les réponses correctes à partir du contenu Markdown et met à jour la base de données."""
         print(f"🔍 Extraction des réponses correctes pour le QCM ID: {qcm_id}...")
@@ -1445,262 +1648,709 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                 return
                 
             print(f"📌 {len(question_map)} questions mappées depuis Supabase.")
-
+            
             # Créer un dictionnaire pour stocker toutes les lettres correctes par question
             corrections_data = {}
-            questions_with_answers = set()  # Pour suivre les questions déjà traitées
+            questions_ambigues = set()  # Pour suivre les questions qui nécessitent une vérification
             
-            # Méthode PRINCIPALE: Recherche "Réponses justes : X, Y, Z"
-            # Cette méthode est la plus fiable et a priorité sur les autres
-            print("🔍 Recherche directe des réponses justes explicites...")
-            reponses_justes_pattern = r'(?:Q(?:uestion)?\s*(\d+)[^A-E]*|^#*\s*(\d+)[^A-E]*|^[^\d]*(\d+)[\.:\)][^A-E]*)(?:.*\n)*?.*[Rr](?:é|e)ponses?\s+(?:justes?|correctes?|exactes?)\s*:?\s*([A-E][,\s]*(?:[A-E][,\s]*)*)'
+            # ÉTAPE 1: Méthode PRINCIPALE: Recherche "Réponses justes : X, Y, Z"
+            # Stratégie modifiée: trouver "Réponses justes" PUIS remonter pour trouver le QXX précédent.
+            print("🔍 Recherche directe des réponses justes explicites (stratégie améliorée)...")
             
-            reponses_justes_matches = list(re.finditer(reponses_justes_pattern, markdown_text, re.MULTILINE))
-            if reponses_justes_matches:
-                for match in reponses_justes_matches:
-                    # Extraire le numéro de question (peut être dans différents groupes selon le format)
-                    question_num = None
-                    for i in range(1, 4):  # Vérifier les groupes 1, 2, 3
-                        if match.group(i):
-                            try:
-                                question_num = int(match.group(i))
-                                break
-                            except (ValueError, TypeError):
-                                pass
-                    
-                    if question_num is None:
-                        continue
-                        
-                    # Extraire les lettres des réponses correctes
-                    answers_str = match.group(4)
-                    letters = re.findall(r'[A-E]', answers_str)
-                    
+            # Motifs pour trouver la ligne "Réponses justes : LETTRES"
+            answer_line_patterns = [
+                r'^[#\s]*[Rr](?:é|e)ponses?\s+(?:justes?|correctes?|exactes?)\s*:?\s*([A-E][,\sA-E]*[A-E])\.?',
+                r'^[#\s]*[Bb]onne(?:s)?\s+[Rr](?:é|e)ponses?\s*:?\s*([A-E][,\sA-E]*[A-E])\.?',
+                r'^[#\s]*[Rr]éponse\s+juste\s*:?\s*([A-E])\.?' # Pour le cas singulier "Réponse juste : A"
+            ]
+            
+            # Motif pour trouver le numéro de la question QXX avant la ligne de réponse
+            # Cherche Q<num>, <num>., <num>), ## Q<num> etc.
+            question_number_pattern = r'(?:^|\n)[#\s]*Q(?:uestion)?\s*(\d+)[\s\.:\)]|\n(\d+)[\s\.:\)]'
+
+            # Parcourir le texte ligne par ligne ou par blocs pour trouver les correspondances
+            # Ici, on va chercher toutes les lignes de réponses d'abord
+            found_answer_lines_with_positions = []
+            for p_idx, ans_pattern in enumerate(answer_line_patterns):
+                for match_ans_line in re.finditer(ans_pattern, markdown_text, re.MULTILINE):
+                    found_answer_lines_with_positions.append({
+                        "match_obj": match_ans_line,
+                        "letters_group_index": 1, # Toutes les regex capturent les lettres dans le groupe 1
+                        "pattern_index": p_idx # Pour le débogage
+                    })
+            
+            # Trier les lignes de réponse trouvées par leur position pour traiter dans l'ordre d'apparition
+            found_answer_lines_with_positions.sort(key=lambda x: x["match_obj"].start())
+
+            last_q_num_found_overall = None # Garder une trace du dernier Qnum global
+
+            for item in found_answer_lines_with_positions:
+                match_ans_line = item["match_obj"]
+                answer_text_start_pos = match_ans_line.start()
+                letters_str = match_ans_line.group(item["letters_group_index"])
+                
+                # Chercher en arrière pour le numéro de question le plus proche
+                # La zone de recherche arrière sera limitée (par exemple, les 1000 caractères précédents)
+                search_before_text = markdown_text[max(0, answer_text_start_pos - 1000):answer_text_start_pos]
+                
+                # Trouver TOUS les numéros de question dans cette zone arrière
+                question_num_matches_before = list(re.finditer(question_number_pattern, search_before_text, re.MULTILINE))
+                
+                current_q_num = None
+                if question_num_matches_before:
+                    # Prendre le DERNIER match (le plus proche de la ligne de réponse)
+                    last_q_match_before = question_num_matches_before[-1]
+                    # Extraire le numéro du bon groupe (celui qui n'est pas None)
+                    num_group1 = last_q_match_before.group(1)
+                    num_group2 = last_q_match_before.group(2)
+                    if num_group1:
+                        current_q_num = int(num_group1)
+                    elif num_group2:
+                        current_q_num = int(num_group2)
+                
+                if current_q_num is None and last_q_num_found_overall is not None:
+                    # Heuristique: si on ne trouve pas de Q avant mais qu'on en a un global, on peut l'utiliser
+                    # Cela peut être risqué si le format est très variable
+                    # print(f"    ⚠️  Pour la ligne de réponse 'R: {letters_str}', aucun Qnum trouvé avant. Utilisation du dernier global: {last_q_num_found_overall}")
+                    # current_q_num = last_q_num_found_overall # Décider si on active cette heuristique
+                    pass # Pour l'instant, on n'active pas cette heuristique par défaut pour éviter les faux positifs
+
+                if current_q_num is not None:
+                    last_q_num_found_overall = current_q_num # Mettre à jour le dernier Qnum global
+                    letters = re.findall(r'[A-E]', letters_str)
                     if letters:
-                        # Éviter les doublons
-                        unique_letters = list(set(letters))
-                        
-                        # Ajouter à corrections_data
-                        corrections_data[question_num] = unique_letters
-                        questions_with_answers.add(question_num)
-                        print(f"✅ Trouvé directement: Question {question_num}, réponses correctes: {', '.join(unique_letters)}")
+                        unique_letters = sorted(list(set(letters)))
+                        if 1 <= len(unique_letters) <= 5:
+                            if current_q_num not in corrections_data:
+                                corrections_data[current_q_num] = unique_letters
+                                print(f"✅ Trouvé (Réponses Justes Explicites): Q {current_q_num}, réponses: {', '.join(unique_letters)}")
+                            # else: # Si on veut logguer les écrasements ou les doublons par cette méthode
+                                # print(f"    ℹ️ (Réponses Justes Explicites) pour Q {current_q_num} déjà trouvé: {corrections_data[current_q_num]}. Nouveau: {unique_letters}. Pattern index: {item['pattern_index']}")
+                        else:
+                            if current_q_num not in questions_ambigues and current_q_num not in corrections_data:
+                                questions_ambigues.add(current_q_num)
+                                print(f"⚠️ Réponse ambiguë (Réponses Justes Explicites) pour Q {current_q_num}: {', '.join(unique_letters)}. Texte: '{letters_str}'")
+                # else:
+                    # print(f"    ⚠️ Ligne de réponse '{match_ans_line.group(0).strip()}' trouvée mais aucun numéro de question associé trouvé avant.")
+
+            # ÉTAPE 2: Analyse directe du texte pour les formats "A. Vrai" / "A. Faux"
+            # S'applique seulement si la question n'a pas encore de réponse
+            print("🔍 Recherche (Vrai/Faux)...")
+            vrai_faux_pattern = r'(?:Question\\s+)?(\\d+)[\\.:\\)]\\s*(?:[^\\n]+\\n+)?([A-E])\\.?\\s+([Vv]rai|[Ff]aux|[Jj]uste|[Cc]orrect|[Ee]xact)'
+            all_vrai_faux_matches = list(re.finditer(vrai_faux_pattern, markdown_text))
             
-            # Obtenir la liste des questions qui n'ont pas encore de réponses
-            missing_questions = set(question_map.keys()) - questions_with_answers
+            if all_vrai_faux_matches:
+                vrai_faux_by_question = {}
+                for match in all_vrai_faux_matches:
+                    try:
+                        question_num = int(match.group(1))
+                        if question_num not in corrections_data: # Ne traiter que si pas déjà résolu
+                            lettre = match.group(2).upper()
+                            vf_status = match.group(3).lower()
+                            if question_num not in vrai_faux_by_question:
+                                vrai_faux_by_question[question_num] = []
+                            if vf_status in ['vrai', 'juste', 'correct', 'exact']:
+                                vrai_faux_by_question[question_num].append(lettre)
+                    except (ValueError, IndexError):
+                        continue
+                
+                for question_num, lettres_vf in vrai_faux_by_question.items():
+                    if lettres_vf and question_num not in corrections_data: # Double vérification
+                        corrections_data[question_num] = sorted(list(set(lettres_vf)))
+                        print(f"✅ Trouvé (Vrai/Faux): Q {question_num}, réponses: {', '.join(corrections_data[question_num])}")
             
-            # Continuer avec les autres méthodes UNIQUEMENT pour les questions non traitées
-            if missing_questions:
-                print(f"ℹ️ {len(missing_questions)} questions n'ont pas de 'Réponses justes' explicites, recherche avec méthodes secondaires...")
-                
-                # Méthode 2: Analyse directe du texte pour les formats "A. Vrai" / "A. Faux"
-                print("🔍 Recherche des annotations Vrai/Faux pour chaque proposition...")
-                
-                # AMÉLIORATION: Pattern étendu pour capturer plus de formats
-                vrai_faux_pattern = r'(?:Question\s+)?(\d+)[\.:\)]\s*(?:[^\n]+\n+)?([A-E])\.?\s+([Vv]rai|[Ff]aux|[Jj]uste|[Cc]orrect)'
-                all_vrai_faux_matches = list(re.finditer(vrai_faux_pattern, markdown_text))
-                
-                if all_vrai_faux_matches:
-                    # Grouper par numéro de question
-                    vrai_faux_by_question = {}
-                    for match in all_vrai_faux_matches:
-                        try:
-                            question_num = int(match.group(1))
-                            # Ne traiter que si la question n'a pas déjà été traitée par la méthode principale
-                            if question_num not in questions_with_answers:
-                                lettre = match.group(2).upper()
-                                vf_status = match.group(3).lower()
-                                
-                                # Initialiser si la question n'existe pas encore
-                                if question_num not in vrai_faux_by_question:
-                                    vrai_faux_by_question[question_num] = []
-                                
-                                # Ajouter seulement si c'est vrai/juste/correct
-                                if vf_status in ['vrai', 'juste', 'correct']:
-                                    vrai_faux_by_question[question_num].append(lettre)
-                                    print(f"Trouvé: Question {question_num}, proposition {lettre} est {vf_status}")
-                        except (ValueError, IndexError):
-                            continue
-                    
-                    # Ajouter aux corrections uniquement pour les questions manquantes
-                    for question_num, lettres in vrai_faux_by_question.items():
-                        if lettres and question_num in missing_questions:  # Seulement si on a au moins une réponse correcte et question non traitée
-                            corrections_data[question_num] = lettres
-                            questions_with_answers.add(question_num)
-                            print(f"✅ Question {question_num}: réponses correctes {', '.join(lettres)} (via Vrai/Faux)")
-                
-                # Mettre à jour les questions manquantes
-                missing_questions = set(question_map.keys()) - questions_with_answers
-                
-                # Méthode 3: Extraction directe des réponses avec pattern plus inclusif
-                if missing_questions:
-                    print("🔍 Recherche des réponses par format multi-réponses...")
-                    # Formats typiques plus étendus: "1:A", "1: A,B,E", "Question 1 : A,D", etc.
-                    multi_answer_pattern = r'(?:Question\s+)?(\d+)\s*[\.:\)]\s*([A-E][,\s]*(?:[A-E][,\s]*)*)'
-                    multi_answers = list(re.finditer(multi_answer_pattern, markdown_text))
-                    
-                    for match in multi_answers:
-                        try:
-                            question_num = int(match.group(1))
-                            # Ne traiter que si la question n'a pas déjà été traitée par d'autres méthodes
-                            if question_num not in questions_with_answers:
-                                answers_str = match.group(2)
-                                letters = re.findall(r'[A-E]', answers_str)
-                                
-                                if letters:
-                                    # Éviter de dédoubler les lettres
-                                    unique_letters = list(set(letters))
-                                    
-                                    corrections_data[question_num] = unique_letters
-                                    questions_with_answers.add(question_num)
-                                    print(f"✅ Question {question_num}: réponses correctes {', '.join(unique_letters)} (via format multi-réponses)")
-                        except (ValueError, IndexError):
-                            continue
+            # ÉTAPE 3: Extraction directe des réponses avec pattern plus inclusif "1:A,B"
+            # S'applique seulement si la question n'a pas encore de réponse
+            print("🔍 Recherche (Format X:A,B)...")
+            multi_answer_pattern = r'(?:Question\\s+)?(\\d+)\\s*[\\.:\\)]\\s*([A-E][,\\s]*(?:[A-E][,\\s]*)*)'
+            multi_answers_matches = list(re.finditer(multi_answer_pattern, markdown_text))
             
-            # Si il reste des questions sans réponses, tenter l'approche par déduction
-            missing_questions = set(question_map.keys()) - questions_with_answers
-            if missing_questions:
-                print(f"ℹ️ {len(missing_questions)} questions n'ont toujours pas de réponses correctes, tentative par déduction...")
+            for match in multi_answers_matches:
+                try:
+                    question_num = int(match.group(1))
+                    if question_num not in corrections_data: # Ne traiter que si pas déjà résolu
+                        answers_str = match.group(2)
+                        letters_multi = re.findall(r'[A-E]', answers_str)
+                        if letters_multi:
+                            unique_letters_multi = sorted(list(set(letters_multi)))
+                            corrections_data[question_num] = unique_letters_multi
+                            print(f"✅ Trouvé (Format X:A,B): Q {question_num}, réponses: {', '.join(unique_letters_multi)}")
+                except (ValueError, IndexError):
+                    continue
+
+            # ÉTAPE 4: Déduction à partir des formulations 'A. Faux.'
+            # S'applique seulement si la question n'a pas encore de réponse
+            print("🔍 Recherche (Déduction par Faux)...")
+            # CORRECTION: Échapper correctement la parenthèse fermante
+            question_pattern_deduction = r'(?:Question|Q\\.?)?\\s*(\\d+)(?:\\s*:|\\.|\\\))' # Correction ici: \\\) 
+            proposition_pattern_deduction = r'([A-E])\\.?\\s+([Ff]aux)' # Cherche explicitement "Faux"
+            
+            faux_propositions_by_question = {}
+            current_question_deduction = None
+
+            for line in markdown_text.split('\\n'):
+                q_match = re.search(question_pattern_deduction, line)
+                if q_match:
+                    try:
+                        current_question_deduction = int(q_match.group(1))
+                        if current_question_deduction not in faux_propositions_by_question and current_question_deduction not in corrections_data:
+                            faux_propositions_by_question[current_question_deduction] = []
+                    except (ValueError, IndexError):
+                        pass
                 
-                # Tentative : détecter les questions où une seule proposition est correcte
-                # par déduction à partir des propositions marquées comme fausses
-                print("🔍 Tentative de déduction à partir des formulations 'A. Faux.'...")
-                
-                # Patterns pour détecter des questions et propositions
-                question_pattern = r'(?:Question|Q\.?)?\s*(\d+)(?:\s*:|\.|\))'
-                proposition_pattern = r'([A-E])\.?\s+([Ff]aux|[Vv]rai)'
-                
-                current_question = None
-                faux_propositions = {}
-                
-                # Parcourir ligne par ligne
-                for line in markdown_text.split('\n'):
-                    # Vérifier si c'est une nouvelle question
-                    q_match = re.search(question_pattern, line)
-                    if q_match:
-                        try:
-                            current_question = int(q_match.group(1))
-                            if current_question not in faux_propositions:
-                                faux_propositions[current_question] = []
-                        except (ValueError, IndexError):
-                            pass
-                    
-                    # Si nous sommes dans une question, chercher les propositions
-                    if current_question is not None and current_question in missing_questions:
-                        prop_matches = re.finditer(proposition_pattern, line)
+                if current_question_deduction is not None and current_question_deduction not in corrections_data:
+                    # S'assurer que la clé existe avant d'y accéder
+                    if current_question_deduction in faux_propositions_by_question:
+                        prop_matches = re.finditer(proposition_pattern_deduction, line)
                         for prop_match in prop_matches:
                             lettre = prop_match.group(1).upper()
-                            statut = prop_match.group(2).lower()
-                            
-                            if statut == 'faux':
-                                faux_propositions[current_question].append(lettre)
-                
-                # Pour chaque question, déduire les bonnes réponses
-                for question_num, faux_lettres in faux_propositions.items():
-                    if question_num in missing_questions and len(faux_lettres) > 0 and len(faux_lettres) < 5:  # Si toutes ne sont pas fausses
-                        all_letters = ['A', 'B', 'C', 'D', 'E']
-                        correct_letters = [l for l in all_letters if l not in faux_lettres]
-                        
-                        if correct_letters:
-                            corrections_data[question_num] = correct_letters
-                            questions_with_answers.add(question_num)
-                            print(f"✅ Question {question_num}: réponses déduites {', '.join(correct_letters)} (par élimination)")
+                            faux_propositions_by_question[current_question_deduction].append(lettre)
+            
+            for question_num, faux_lettres in faux_propositions_by_question.items():
+                if question_num not in corrections_data: # Vérifier à nouveau
+                    if 0 < len(faux_lettres) < 5: # Doit y avoir des faux, mais pas tous faux
+                        all_prop_letters = ['A', 'B', 'C', 'D', 'E']
+                        correct_letters_deduced = sorted([l for l in all_prop_letters if l not in faux_lettres])
+                        if correct_letters_deduced:
+                            corrections_data[question_num] = correct_letters_deduced
+                            print(f"✅ Trouvé (Déduction): Q {question_num}, réponses: {', '.join(correct_letters_deduced)}")
+            
+            # ÉTAPE 5: Interrogation de l'API Chat Mistral pour les questions restantes
+            questions_needing_api_chat = sorted([
+                q_num for q_num in question_map.keys() if q_num not in corrections_data
+            ])
 
-            # Si des questions n'ont toujours pas de réponses, on pourrait utiliser l'API Mistral ici
-            # Mais nous allons conserver les questions déjà trouvées
+            if questions_needing_api_chat:
+                print(f"\\n🤖 Tentative API Chat pour {len(questions_needing_api_chat)} questions restantes: {questions_needing_api_chat}")
+                for question_num in questions_needing_api_chat:
+                    # ... (récupération question_text et propositions_for_api comme avant)
+                    # Assurez-vous que cette partie est correcte pour récupérer les détails de la question
+                    question_id_db_api = question_map.get(question_num)
+                    if not question_id_db_api: continue
+                    q_details_result_api = self.supabase.table("questions").select("contenu, uuid").eq("id", question_id_db_api).single().execute()
+                    if not q_details_result_api.data or not q_details_result_api.data.get("contenu"): continue
+                    question_text_from_db_api = q_details_result_api.data["contenu"].get("text", "") if isinstance(q_details_result_api.data["contenu"], dict) else str(q_details_result_api.data["contenu"])
+                    question_uuid_api = q_details_result_api.data.get("uuid")
+                    if not question_uuid_api: continue
+                    props_result_api = self.supabase.table("reponses").select("lettre, contenu").eq("question_id", question_uuid_api).order("lettre", desc=False).execute()
+                    if not props_result_api.data: continue
+                    propositions_for_api = [{"lettre": p["lettre"], "texte": (p["contenu"].get("text", "N/A") if isinstance(p["contenu"], dict) else str(p["contenu"]))} for p in props_result_api.data]
+                    if not question_text_from_db_api or not propositions_for_api: continue
+                    
+                    api_chat_letters = self._get_correct_answers_with_chat_api(question_num, question_text_from_db_api, propositions_for_api)
+                    
+                    if api_chat_letters and question_num not in corrections_data: # Vérifier à nouveau avant d'écrire
+                        corrections_data[question_num] = api_chat_letters
+                        if question_num in questions_ambigues: questions_ambigues.remove(question_num)
+                        print(f"  ✅ API Chat: Q {question_num}, réponses: {', '.join(api_chat_letters)}")
+                    elif api_chat_letters:
+                        print(f"  ℹ️ API Chat pour Q {question_num} a trouvé {api_chat_letters}, mais réponse existait déjà: {corrections_data[question_num]}")
+                    else:
+                        print(f"  ℹ️ API Chat: Aucune réponse trouvée pour Q {question_num}.")
+                    time.sleep(0.5) 
             
-            # Si toujours aucune réponse trouvée, fournir un feedback et continuer
-            if not corrections_data:
-                print("⚠️ Impossible de détecter les réponses correctes. Vérifiez manuellement le document.")
-                return
+            # ÉTAPE 6: API Vision pour les questions toujours manquantes OU ambiguës
+            questions_for_vision_check = sorted(list(
+                (set(question_map.keys()) - set(corrections_data.keys())).union(questions_ambigues.intersection(set(question_map.keys())))
+            ))
+
+            if questions_for_vision_check:
+                print(f"\\n🖼️ Vérification API Vision pour {len(questions_for_vision_check)} questions: {questions_for_vision_check}...")
+                # ... (logique pour pdf_stem et images_dir_path comme avant) ...
+                pdf_stem_match_vision = None
+                if isinstance(markdown_text, str):
+                     match_path_vision = re.search(r'qcm_extraction/temp/outputs/([^/]+)/content\\.md', markdown_text)
+                     if match_path_vision: pdf_stem_match_vision = match_path_vision.group(1)
+
+                current_pdf_stem_vision = getattr(self, '_current_pdf_stem', None) # Si vous l'avez stocké
                 
-            # Montrer les stats
-            all_questions = set(question_map.keys())
-            missing_final = all_questions - questions_with_answers
-            if missing_final:
-                print(f"⚠️ {len(missing_final)} questions n'ont pas de réponses correctes identifiées: {sorted(missing_final)}")
+                pdf_stem_for_vision = current_pdf_stem_vision or pdf_stem_match_vision
+                
+                if not pdf_stem_for_vision:
+                    qcm_info_vision = self.supabase.table("qcm").select("uuid").eq("id", qcm_id).single().execute()
+                    if qcm_info_vision.data and qcm_info_vision.data.get("uuid"):
+                         # Fallback très spéculatif: pdf_stem_for_vision = str(qcm_info_vision.data["uuid"])
+                         # Il est préférable de s'assurer que pdf_stem est disponible plus tôt.
+                         print("⚠️ pdf_stem non déterminé de manière fiable pour Vision, tentative avec UUID du QCM comme nom de dossier (spéculatif)...")
+                         # Pour l'instant, on va juste afficher un avertissement si non trouvé.
+                         pass
+
+
+                if pdf_stem_for_vision:
+                    images_dir_path_vision = self.images_dir / pdf_stem_for_vision
+                    if not images_dir_path_vision.exists():
+                        print(f"⚠️ Dossier d'images {images_dir_path_vision} non trouvé pour API Vision.")
+                    else:
+                        for question_num_vision in questions_for_vision_check:
+                            # Si une réponse a été trouvée par l'API Chat entre-temps pour une question ambiguë
+                            if question_num_vision in corrections_data and question_num_vision not in questions_ambigues:
+                                continue
+
+                            print(f"  🖼️ Vérification Vision pour Q {question_num_vision}...")
+                            estimated_page_vision = (question_num_vision // 5) + 1 
+                            
+                            found_by_vision = False
+                            for page_offset_vision in range(-1, 2): 
+                                page_to_check = max(1, estimated_page_vision + page_offset_vision)
+                                image_path_vision_file = images_dir_path_vision / f"page_{page_to_check}.jpg"
+
+                                if image_path_vision_file.exists():
+                                    response_vision = self._verify_correct_answers_with_vision(str(image_path_vision_file), question_num_vision)
+                                    if response_vision and response_vision.get("correct_answers"):
+                                        fetched_letters_vision = response_vision.get("correct_answers", [])
+                                        if fetched_letters_vision:
+                                            # Appliquer si la question n'a pas de réponse OU si elle était ambiguë et Vision la confirme/clarifie
+                                            if question_num_vision not in corrections_data or question_num_vision in questions_ambigues:
+                                                print(f"    ✅ Vision API: Q {question_num_vision}, réponses: {', '.join(fetched_letters_vision)}. Précédent: {corrections_data.get(question_num_vision)}")
+                                                corrections_data[question_num_vision] = fetched_letters_vision
+                                                if question_num_vision in questions_ambigues: questions_ambigues.remove(question_num_vision)
+                                                found_by_vision = True
+                                                break 
+                                            # else: # Déjà résolue par une méthode plus prioritaire et non ambiguë
+                                                # print(f"    ℹ️ Vision API pour Q {question_num_vision} a trouvé {fetched_letters_vision}, mais réponse fiable existait: {corrections_data[question_num_vision]}")
+                                    time.sleep(0.5) 
+                            if not found_by_vision:
+                                 print(f"    ℹ️ Vision API n'a pas trouvé/confirmé de réponse pour Q{question_num_vision}")
+                else:
+                    print("⚠️ pdf_stem non trouvé pour l'API Vision. Vérification Vision sautée.")
+
+            # Mise à jour finale en base de données
+            final_resolved_questions = set(corrections_data.keys())
+            print(f"\\n🔄 Mise à jour de la base de données avec {len(final_resolved_questions)} ensembles de réponses correctes trouvées...")
+            updated_propositions_count = 0
             
-            # Maintenant, récupérer les réponses et mettre à jour leur statut
-            print(f"📊 Réponses correctes trouvées pour {len(corrections_data)} questions")
-            print(f"🔄 Mise à jour des réponses dans Supabase...")
+            for question_num, correct_letters in corrections_data.items():
+                if question_num not in question_map:
+                    print(f"⚠️ Tentative de mise à jour pour question_num {question_num} non trouvé dans question_map.")
+                    continue
+
+                # question_map[question_num] CONTIENT DÉJÀ L'UUID PK de la table 'questions'
+                question_pk_uuid_for_reponses = question_map[question_num]
+                
+                # L'ancienne logique récupérait la colonne 'uuid' (non-PK) ce qui était incorrect ici.
+                # question_details_result = self.supabase.table("questions").select("uuid").eq("id", question_pk_uuid_for_reponses).single().execute()
+                # if not question_details_result.data or "uuid" not in question_details_result.data:
+                #     print(f"⚠️ Impossible de récupérer l'UUID (colonne uuid) pour la question PK UUID {question_pk_uuid_for_reponses} (Numéro {question_num}).")
+                #     continue
+                # question_secondary_uuid = question_details_result.data["uuid"] # Ceci était l'UUID de la colonne 'uuid', pas la PK
+
+                # Récupérer les propositions pour cette question_id (qui est la PK UUID de la question)
+                propositions_result = self.supabase.table("reponses").select("id, lettre").eq("question_id", question_pk_uuid_for_reponses).execute()
+                
+                if propositions_result.data:
+                    for prop in propositions_result.data:
+                        is_correct = prop["lettre"] in correct_letters
+                        try:
+                            update_response = self.supabase.table("reponses").update({"est_correcte": is_correct}).eq("id", prop["id"]).execute()
+                            updates_counter += 1 # Compter chaque tentative de mise à jour
+                            # Vérifier si des lignes ont été affectées (Supabase peut ne pas retourner cela directement dans .data pour update)
+                            # La vérification de l'erreur se fait via l'exception potentielle.
+                            # print(f"   Mise à jour Proposition ID {prop['id']} ({prop['lettre']}) pour Question {question_num}: est_correcte = {is_correct}")
+                        except Exception as e:
+                            print(f"❌ Erreur lors de la mise à jour de la proposition ID {prop['id']} pour Question {question_num}: {e}")
+                else:
+                    print(f"⚠️ Aucune proposition trouvée pour la question UUID {question_uuid} (Numéro {question_num}) lors de la mise à jour.")
+
+            print(f"✨ {updates_counter} propositions mises à jour dans la base de données.")
+            # CORRECTION: Utiliser final_resolved_questions au lieu de questions_with_answers (qui n'existe plus)
+            print(f"✅ Processus d'extraction des réponses correctes terminé. {len(final_resolved_questions)} questions traitées.")
             
-            # MÉTHODE SIMPLIFIÉE ET PLUS ROBUSTE pour mettre à jour les réponses
-            for numero, lettres_correctes in corrections_data.items():
-                # Vérification si la question existe dans la base de données
-                if numero not in question_map:
-                    print(f"⚠️ Question {numero} non trouvée dans le mappage Supabase")
+            # Afficher les questions qui n'ont toujours pas de réponses après toutes les étapes
+            # CORRECTION: Utiliser corrections_data.keys() (ou final_resolved_questions) au lieu de questions_with_answers
+            final_missing_questions = set(question_map.keys()) - final_resolved_questions 
+            if final_missing_questions:
+                print(f"⚠️ Attention: {len(final_missing_questions)} questions n'ont toujours pas de réponses correctes identifiées: {sorted(list(final_missing_questions))}")
+            else:
+                print("🎉 Toutes les questions ont des réponses correctes identifiées!")
+
+        except Exception as e:
+            print(f"❌ Erreur majeure dans extract_correct_answers: {str(e)}")
+            import traceback
+            traceback.print_exc() # Imprime la trace complète de l'erreur
+
+    def _get_correct_answers_with_chat_api(self, question_num: int, question_text: str, propositions: List[Dict[str, str]]) -> List[str]:
+        """
+        Utilise l'API de chat Mistral pour déterminer les réponses correctes d'une question.
+
+        Args:
+            question_num (int): Le numéro de la question.
+            question_text (str): Le texte de la question.
+            propositions (List[Dict[str, str]]): Liste des propositions, ex: [{"lettre": "A", "texte": "..."}]
+
+        Returns:
+            List[str]: Une liste des lettres des réponses jugées correctes par l'API.
+        """
+        if not question_text or not propositions:
+            return []
+
+        print(f"🤖 Appel API Chat pour Q{question_num}: Détermination des réponses correctes...")
+
+        # Construction du prompt plus robuste
+        prompt_lines = []
+        prompt_lines.append(f"Question {question_num}: {question_text}")
+        prompt_lines.append("") # Ligne vide
+        for prop in propositions:
+            prompt_lines.append(f"{prop['lettre']}. {prop.get('texte', 'N/A')}")
+        prompt_lines.append("") # Ligne vide
+        prompt_lines.append("Quelles sont la ou les lettres des réponses correctes (A, B, C, D, E) à cette question ? Répondez uniquement avec les lettres correctes, séparées par des virgules si plusieurs. Par exemple: A ou A,C ou B,D,E.")
+        
+        prompt_content = "\n".join(prompt_lines)
+        messages = [UserMessage(content=prompt_content)]
+
+        try:
+            response = self._call_api_with_retry(
+                self.client.chat.create,
+                model="mistral-small-latest",
+                messages=messages,
+                temperature=0.0,
+                max_tokens=20
+            )
+
+            if response and response.choices:
+                content = response.choices[0].message.content.strip().upper()
+                correct_letters = re.findall(r'[A-E]', content)
+                
+                if correct_letters:
+                    print(f"🤖 API Chat pour Q{question_num}: Réponses suggérées: {', '.join(correct_letters)}")
+                    return sorted(list(set(correct_letters)))
+                else:
+                    print(f"⚠️ API Chat pour Q{question_num}: Aucune lettre correcte identifiée dans la réponse: '{content}'")
+            else:
+                print(f"⚠️ API Chat pour Q{question_num}: Réponse invalide ou vide de l'API.")
+
+        except Exception as e:
+            print(f"❌ Erreur lors de l'appel API Chat pour Q{question_num}: {e}")
+
+        return []
+
+    def _verify_correct_answers_with_vision(self, image_path: str, question_num: int) -> dict:
+        """
+        Utilise l'API vision pour vérifier les réponses correctes à une question spécifique.
+        
+        Args:
+            image_path (str): Chemin vers l'image de la page à analyser
+            question_num (int): Numéro de la question à vérifier
+            
+        Returns:
+            dict: Dictionnaire contenant les informations extraites
+        """
+        try:
+            print(f"    🔍 Analyse de l'image {image_path} pour la question {question_num}...")
+            
+            # Encoder l'image en base64
+            with open(image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode("utf-8")
+            
+            # Construire les messages pour l'API vision
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": f"""Analyse cette image d'un QCM médical et identifie les RÉPONSES CORRECTES pour la Question {question_num} uniquement.
+
+CONSIGNES PRÉCISES:
+1. Cherche UNIQUEMENT la Question {question_num} et ses réponses correctes
+2. Cherche des indications comme "Réponses justes", "Réponses correctes", "Bonnes réponses", etc.
+3. Tu peux aussi repérer les réponses marquées individuellement comme "Vrai" ou "Faux" 
+4. Si plusieurs réponses sont correctes, liste-les toutes (A, B, C, D, E)
+
+RÉPONDS UNIQUEMENT AU FORMAT JSON:
+{{
+  "question_num": {question_num},
+  "correct_answers": ["A", "C", "E"],  // Liste des lettres correctes uniquement (A, B, C, D, E)
+  "confidence": 0.95,  // Ta confiance dans ta réponse de 0 à 1
+  "explanation": "J'ai trouvé ces réponses car..."  // Brève explication
+}}
+
+N'ajoute AUCUN texte avant ou après ce JSON."""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    ]
+                }
+            ]
+            
+            # Appeler l'API vision
+            response = self._call_api_with_retry(
+                self.client.chat.complete,
+                model="mistral-large-latest",  # Utiliser le modèle large qui a de meilleures capacités de vision
+                messages=messages,
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            
+            if response is None:
+                print(f"    ❌ Échec de l'appel API vision pour la question {question_num}")
+                return None
+            
+            try:
+                # Extraire le JSON de la réponse
+                content = response.choices[0].message.content.strip()
+                result = json.loads(content)
+                
+                # Vérifier que la structure du résultat est correcte
+                if "question_num" in result and "correct_answers" in result:
+                    verified_num = result["question_num"]
+                    
+                    # Vérifier que la réponse concerne bien la question demandée
+                    if verified_num == question_num:
+                        correct_answers = result["correct_answers"]
+                        confidence = result.get("confidence", 0)
+                        explanation = result.get("explanation", "")
+                        
+                        print(f"    ✅ Réponses identifiées par vision pour Q{question_num}: {', '.join(correct_answers)} (confiance: {confidence:.2f})")
+                        print(f"    ℹ️ Explication: {explanation}")
+                        
+                        return result
+                    else:
+                        print(f"    ⚠️ La réponse concerne la question {verified_num}, mais nous cherchions la question {question_num}")
+                else:
+                    print(f"    ⚠️ Réponse API mal formatée pour la question {question_num}")
+                    
+            except json.JSONDecodeError:
+                print(f"    ⚠️ Impossible de décoder la réponse JSON pour la question {question_num}")
+                
+            return None
+                
+        except Exception as e:
+            print(f"    ❌ Erreur lors de la vérification des réponses avec vision: {str(e)}")
+            return None
+
+    def _extract_questions_api(self, content: str, section_index: int = 0) -> List[Dict]:
+        """Extrait les questions d'un texte en utilisant l'API LLM."""
+        
+        # Vérifier si cette section contient du contenu remplacé
+        has_replaced_content = "<!-- REPLACED_CONTENT:START -->" in content and "<!-- REPLACED_CONTENT:END -->" in content
+        
+        # Si c'est un contenu remplacé, indiquer cela dans le prompt
+        instruction_remplace = ""
+        if has_replaced_content:
+            instruction_remplace = "\n\nATTENTION: Ce contenu contient des questions qui ont été remplacées manuellement (entre les balises REPLACED_CONTENT). Traite-les avec soin et assure-toi de bien extraire toutes les questions remplacées."
+        
+        # Extraire les numéros de questions potentielles via regex
+        potential_questions = re.findall(r'(?:Q(?:uestion)?\s*(\d+)|^(\d+)\s*[\.\)])', content, re.MULTILINE)
+        flattened_matches = [num for match in potential_questions for num in match if num]
+        
+        # Créer un prompt ciblé et adapté au contenu
+        prompt = f"""Tu es un expert en analyse de QCM médicaux. Ta mission est d'extraire uniquement les questions (sans les propositions) d'un document de QCM.{instruction_remplace}
+
+INSTRUCTIONS ESSENTIELLES:
+1. Pour chaque question, je veux son numéro et son texte complet
+2. N'inclus PAS les propositions (A,B,C,D,E) dans le texte de la question
+3. Ignore les explications et les corrections
+4. Assure-toi d'extraire TOUTES les questions, même celles qui pourraient être mal formatées
+
+J'ai détecté ces numéros potentiels de questions dans le texte: {', '.join(flattened_matches) if flattened_matches else "aucun numéro détecté automatiquement"}
+
+===== EXEMPLE DE RÉSULTAT ATTENDU =====
+[
+  {{
+    "numero_question": 1,
+    "texte_question": "Le texte complet de la question 1"
+  }},
+  {{
+    "numero_question": 2,
+    "texte_question": "Le texte complet de la question 2"
+  }}
+]
+
+===== CONTENU À ANALYSER =====
+{content}
+"""
+        
+        # Tronquer si trop long
+        max_tokens = 20000
+        if len(prompt) > max_tokens:
+            prompt = prompt[:max_tokens]
+        
+        try:
+            # Utiliser un modèle adapté à la longueur et complexité
+            model = "mistral-small-latest"
+            if len(prompt) > 15000:
+                model = "mistral-medium-latest"  # Plus robuste pour les contenus longs
+                
+            messages = [UserMessage(content=prompt)]
+            response = self._call_api_with_retry(
+                self.client.chat.complete,
+                model=model,
+                messages=messages,
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            
+            # Vérifier si l'appel API a échoué
+            if response is None:
+                print(f"    ❌ Échec de l'appel API pour extraire les questions (section {section_index})")
+                return []
+            
+            if response.choices and response.choices[0].message and response.choices[0].message.content:
+                extracted_data_str = response.choices[0].message.content
+                try:
+                    # Extraire les données JSON
+                    extracted_data = json.loads(extracted_data_str)
+                    
+                    # Normaliser les données (gérer différents formats de réponse)
+                    normalized_data = []
+                    
+                    if isinstance(extracted_data, list):
+                        normalized_data = extracted_data
+                    elif isinstance(extracted_data, dict):
+                        if "questions" in extracted_data:
+                            normalized_data = extracted_data["questions"]
+                        elif "resultats" in extracted_data:
+                            normalized_data = extracted_data["resultats"]
+                        
+                    # Filtrer et normaliser les résultats
+                    valid_questions = []
+                    for item in normalized_data:
+                        if not isinstance(item, dict):
+                            continue
+                            
+                        numero = item.get("numero_question") or item.get("numero") or item.get("question")
+                        texte = item.get("texte_question") or item.get("texte") or item.get("contenu")
+                        
+                        if not numero or not texte:
+                            continue
+                            
+                        try:
+                            if not isinstance(numero, int):
+                                numero = int(str(numero).strip())
+                                
+                            valid_questions.append({
+                                "numero_question": numero,
+                                "texte_question": str(texte).strip()
+                            })
+                        except (ValueError, TypeError):
+                            continue
+                    
+                    return valid_questions
+                    
+                except json.JSONDecodeError as e:
+                    print(f"    ⚠️ Erreur JSON dans l'extraction des questions (section {section_index}): {str(e)}")
+                    return []
+                except Exception as e:
+                    print(f"    ⚠️ Erreur dans le traitement des questions (section {section_index}): {str(e)}")
+                    return []
+        except Exception as e:
+            print(f"    ⚠️ Exception lors de l'appel API pour les questions (section {section_index}): {str(e)}")
+            return []
+        
+        return []
+
+    def _save_propositions(self, qcm_id: int, propositions_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sauvegarde les propositions dans Supabase."""
+        # Récupérer les IDs des questions depuis Supabase
+        print(f"🔍 Récupération des IDs des questions depuis Supabase pour le QCM ID: {qcm_id}...")
+        questions_data = self.supabase.table('questions').select('id,numero').eq('qcm_id', qcm_id).execute()
+        questions_by_numero = {q['numero']: q['id'] for q in questions_data.data}
+        
+        print(f"📌 {len(questions_by_numero)} questions mappées par numéro depuis Supabase.")
+        
+        # Nettoyer les propositions existantes pour éviter les doublons
+        self._clean_existing_propositions(qcm_id)
+        
+        # Créer la liste des propositions à sauvegarder
+        propositions_to_save = []
+        
+        all_questions_have_propositions = True
+        
+        for prop_set in propositions_data:
+            numero_question = prop_set.get('numero_question')
+            propositions = prop_set.get('propositions', {})
+            
+            # Vérifier si la question existe
+            if numero_question not in questions_by_numero:
+                print(f"⚠️ Question {numero_question} non trouvée dans Supabase, ses propositions ne seront pas sauvegardées.")
+                continue
+            
+            question_id = questions_by_numero[numero_question]
+            
+            # Vérifier que les propositions sont au bon format
+            if not isinstance(propositions, dict) or not propositions:
+                print(f"⚠️ Format de proposition invalide pour la question {numero_question}, ignorée.")
+                all_questions_have_propositions = False
+                continue
+            
+            # Ajouter chaque proposition à la liste
+            for lettre, contenu in propositions.items():
+                # Ne pas ajouter si la lettre n'est pas valide
+                if lettre not in ['A', 'B', 'C', 'D', 'E']:
+                    print(f"⚠️ Lettre invalide '{lettre}' pour la question {numero_question}, ignorée.")
                     continue
                 
-                question_id = question_map[numero]
-                
-                # 1. D'abord, récupérer toutes les réponses pour cette question
+                propositions_to_save.append({
+                    'question_id': question_id,
+                    'lettre': lettre,
+                    'contenu': contenu,
+                    'est_correcte': False  # Par défaut, sera mis à jour plus tard
+                })
+        
+        # Sauvegarder les propositions en batch
+        total_propositions = len(propositions_to_save)
+        if total_propositions > 0:
+            print(f"💾 Sauvegarde de {total_propositions} propositions dans Supabase...")
+            
+            # Sauvegarder par batches de 100 propositions max
+            batch_size = 100
+            for i in range(0, total_propositions, batch_size):
+                batch = propositions_to_save[i:i+batch_size]
+                progress = i / total_propositions * 100
+                print(f"⌛ [{self._progress_bar(progress)}] {progress:.0f}% - Insertion des propositions")
+                result = self.supabase.table('reponses').insert(batch).execute()
+            
+            print(f"✅ {total_propositions} propositions sauvegardées dans Supabase")
+        else:
+            print("⚠️ Aucune proposition à sauvegarder.")
+            all_questions_have_propositions = False
+        
+        return propositions_to_save, all_questions_have_propositions
+    
+    def _clean_existing_propositions(self, qcm_id: int) -> None:
+        """Nettoie les propositions existantes pour les questions d'un QCM donné."""
+        print(f"🧹 Nettoyage des propositions existantes pour le QCM ID: {qcm_id}...")
+        
+        # Récupérer toutes les questions pour le QCM
+        questions_data = self.supabase.table('questions').select('id').eq('qcm_id', qcm_id).execute()
+        
+        if not questions_data.data:
+            print(f"⚠️ Aucune question trouvée pour le QCM ID: {qcm_id}, rien à nettoyer.")
+            return
+        
+        question_ids = [q['id'] for q in questions_data.data]
+        
+        # Supprimer toutes les propositions pour ces questions
+        props_to_delete = []
+        for question_id in question_ids:
+            # Récupérer les propositions pour cette question
+            props = self.supabase.table('reponses').select('id').eq('question_id', question_id).execute()
+            if props.data:
+                props_to_delete.extend([p['id'] for p in props.data])
+        
+        if not props_to_delete:
+            print(f"✅ Aucune proposition existante à supprimer.")
+            return
+        
+        print(f"🗑️ Suppression de {len(props_to_delete)} propositions existantes...")
+        
+        # Supprimer par batches de 100 propositions max
+        batch_size = 100
+        total_props = len(props_to_delete)
+        
+        for i in range(0, total_props, batch_size):
+            batch = props_to_delete[i:i+batch_size]
+            progress = i / total_props * 100
+            print(f"⌛ [{self._progress_bar(progress)}] {progress:.0f}% - Suppression des propositions existantes")
+            
+            # Supprimer chaque proposition individuellement
+            for prop_id in batch:
                 try:
-                    responses_result = self.supabase.table("reponses").select("id", "lettre").eq("question_id", question_id).execute()
-                    
-                    if not responses_result.data:
-                        print(f"⚠️ Aucune réponse trouvée pour la question {numero}")
-                        continue
-                    
-                    print(f"📊 Question {numero}: {len(responses_result.data)} propositions trouvées, {len(lettres_correctes)} correctes ({', '.join(lettres_correctes)})")
-                    
-                    # 2. Mettre à jour chaque réponse individuellement (approche fiable)
-                    for response in responses_result.data:
-                        response_id = response.get("id")
-                        lettre = response.get("lettre")
-                        
-                        if not response_id or not lettre:
-                            continue
-                        
-                        # Déterminer si cette réponse est correcte
-                        est_correcte = lettre in lettres_correctes
-                        
-                        try:
-                            # Mise à jour explicite avec vérification du résultat
-                            result = self.supabase.table("reponses").update({"est_correcte": est_correcte}).eq("id", response_id).execute()
-                            
-                            if result.data:
-                                updates_counter += 1
-                                status_str = "CORRECTE" if est_correcte else "incorrecte"
-                                print(f"    ✅ Proposition {lettre} (ID: {response_id}) marquée comme {status_str}")
-                            else:
-                                print(f"    ⚠️ Mise à jour non confirmée pour proposition {lettre} (ID: {response_id})")
-                        except Exception as e:
-                            print(f"    ⚠️ Erreur lors de la mise à jour de la proposition {lettre} (ID: {response_id}): {str(e)}")
+                    self.supabase.table('reponses').delete().eq('id', prop_id).execute()
                 except Exception as e:
-                    print(f"⚠️ Erreur lors de la récupération des réponses pour la question {numero}: {str(e)}")
-            
-            # Vérification finale des mises à jour
-            if updates_counter > 0:
-                print(f"✅ Mise à jour terminée: {updates_counter} réponses mises à jour.")
-                print(f"✅ {len(corrections_data)} questions ont leurs réponses correctes identifiées.")
-            else:
-                print("⚠️ Aucune mise à jour n'a été effectuée. Tentative de méthode alternative...")
-                
-                # MÉTHODE ALTERNATIVE: mise à jour directe par lettre et question
-                alt_updates = 0
-                for numero, lettres_correctes in corrections_data.items():
-                    if numero not in question_map:
-                        continue
-                    
-                    question_id = question_map[numero]
-                    
-                    # Mettre à jour directement par lettres
-                    for lettre in "ABCDE":
-                        est_correcte = lettre in lettres_correctes
-                        try:
-                            result = self.supabase.table("reponses").update({"est_correcte": est_correcte}).eq("question_id", question_id).eq("lettre", lettre).execute()
-                            if result.data and len(result.data) > 0:
-                                alt_updates += 1
-                                print(f"    ✅ Question {numero}, Proposition {lettre}: mise à jour alternative réussie")
-                        except Exception as e:
-                            print(f"    ⚠️ Erreur lors de la mise à jour alternative pour Q{numero}, Prop {lettre}: {str(e)}")
-                
-                if alt_updates > 0:
-                    print(f"✅ Méthode alternative: {alt_updates} réponses mises à jour.")
-                else:
-                    print("❌ Toutes les méthodes de mise à jour ont échoué.")
-            
-        except Exception as e:
-            print(f"🔥 Erreur lors de la récupération des données depuis Supabase: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
-            
-        return updates_counter
+                    print(f"⚠️ Erreur lors de la suppression de la proposition ID {prop_id}: {str(e)}")
+                    continue
+        
+        print(f"✅ {total_props} propositions existantes supprimées.")
