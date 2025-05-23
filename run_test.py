@@ -35,7 +35,7 @@ if __name__ == "__main__":
     extractor = QCMExtractor(api_key=mistral_api_key, supabase_url=supabase_url, supabase_key=supabase_key)
     
     # URL du PDF à traiter
-    pdf_url = "https://ityugjyhrtvlvhbyohyi.supabase.co/storage/v1/object/public/qcm_pdfs/Nancy/UE1/QCM/ue1-correction-colle-2-s42-2021-49647.pdf"
+    pdf_url = "https://ityugjyhrtvlvhbyohyi.supabase.co/storage/v1/object/public/qcm_pdfs/Nancy/UE2/QCM/ue2-correction-colle1-s38-21-22-47305.pdf"
     
     print(f"🚀 Lancement du traitement complet pour: {pdf_url}")
     

@@ -17,7 +17,7 @@ def main():
     
     # Extraire les métadonnées et les questions
     metadata = extractor.extract_metadata_from_path(pdf_url)
-    
+        
     # Afficher les résultats
     end_time = time.time()
     duration = end_time - start_time
@@ -30,11 +30,11 @@ def main():
         print(f"Année: {metadata.get('annee', 'Non détectée')}")
         print(f"Nombre de questions extraites: {metadata.get('questions_count', 'Non disponible')}")
         print(f"Nombre de propositions extraites: {metadata.get('propositions_count', 'Non disponible')}")
-        
+            
         # Vérifier si on a des statistiques de complétude
         if 'extraction_completeness' in metadata:
             print(f"Complétude de l'extraction: {metadata['extraction_completeness']:.1f}%")
-    else:
+            else:
         print("❌ L'extraction a échoué")
 
 if __name__ == "__main__":

@@ -89,8 +89,8 @@ def main():
     
     # Lire le contenu du Markdown
     with open(markdown_path, "r", encoding="utf-8") as f:
-        markdown_content = f.read()
-    
+            markdown_content = f.read()
+        
     print(f"\n===== TEST D'EXTRACTION DES RÉPONSES CORRECTES POUR LE QCM ID {qcm_id} =====")
     print(f"Fichier Markdown utilisé: {markdown_path}")
     
