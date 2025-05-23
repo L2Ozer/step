@@ -1,10 +1,19 @@
+# QCM Medical Extraction System - .gitignore
+# ==========================================
+
+# Environment Variables
+.env
+.env.local
+.env.development
+.env.production
+.env.test
+
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -16,34 +25,215 @@ lib64/
 parts/
 sdist/
 var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Virtual Environment
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
 venv/
 ENV/
-env/
+env.bak/
+venv.bak/
 
-# Extracted content and temporary files
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# QCM Specific Files
+# ==================
+
+# Temporary files generated during extraction
 qcm_extraction/temp/
-qcm_extraction/logs/
-temp/
+*.tmp
+*.temp
+
+# Downloaded PDFs (can be large)
+qcm_extraction/temp/pdfs/
+pdfs/
+*.pdf
+
+# Generated images
+qcm_extraction/temp/images/
+images/
+*.png
+*.jpg
+*.jpeg
+
+# Generated outputs
+qcm_extraction/temp/outputs/
+outputs/
+*.md
+metadata.json
+
+# Logs
+logs/
 *.log
+*.log.*
 
-# Local environment variables
-.env
+# Database backups
+*.sql
+*.db
+*.sqlite
+*.sqlite3
 
-# IDE
-.idea/
+# API Keys and Sensitive Data
+config.json
+secrets.json
+credentials.json
+*_key.txt
+*_secret.txt
+
+# IDE and Editor Files
+# ===================
+
+# VSCode
 .vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
 *.swp
 *.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+
+# Linux
+*~
+
+# Backup files
+*.bak
+*.backup
+*.old
+*.orig
+
+# Documentation builds
+docs/_build/
+docs/build/
+
+# Local development scripts
+test_local.py
+debug_*.py
+dev_*.py
+
+# Performance profiling
+*.prof
+*.profile
+
+# Large files that shouldn't be committed
+*.tar.gz
+*.zip
+*.rar
+*.7z
 
 # System files
-.DS_Store
-Thumbs.db
+*.pid
+*.sock
+*.lock
 
-# Temporary PDF files
-*.temp.pdf
-temp_qcm.pdf 
+# Cache directories
+.cache/
+cache/
+__temp__/
+
+# Local configuration overrides
+local_config.py
+local_settings.py 

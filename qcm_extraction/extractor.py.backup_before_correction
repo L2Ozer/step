@@ -458,19 +458,6 @@ D. Faux. Une chromatine dont les histones sont acétylées et l'ADN non méthyl�
                         self._extract_and_save_propositions(markdown_content_for_processing, qcm_id_for_processing, saved_questions_details)
                         print("🏁 Phase 2 terminée.")
                         
-                        # Phase 3: Extraction des réponses correctes
-                        print("▶️ Lancement de la Phase 3: Extraction des réponses correctes...")
-                        print("⏸️ Pause de 5 secondes avant l'extraction des réponses correctes...")
-                        time.sleep(5)
-                        
-                        updates_count = self.extract_correct_answers(markdown_content_for_processing, qcm_id_for_processing)
-                        if updates_count and updates_count > 0:
-                            print(f"✅ Phase 3 terminée: {updates_count} réponses correctes mises à jour")
-                            metadata["correct_answers_updated"] = updates_count
-                        else:
-                            print("⚠️ Phase 3: Aucune réponse correcte mise à jour")
-                            metadata["correct_answers_updated"] = 0
-                        
                         # Compter les propositions après insertion pour les statistiques
                         prop_count_after = 0
                         try:
